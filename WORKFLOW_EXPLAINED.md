@@ -4,7 +4,7 @@ This document explains the COMPLETE software development lifecycle for this proj
 
 ---
 
-## 📊 The Big Picture
+## 📊 The Big Picture 
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
@@ -80,7 +80,7 @@ This document explains the COMPLETE software development lifecycle for this proj
 
 **What happens locally on your machine:**
 
-1. **Code Editing**
+1. **Testing**
    - You write/modify code in `src/App.jsx`
    - Use any editor (VS Code, Cursor, Sublime, etc.)
 
