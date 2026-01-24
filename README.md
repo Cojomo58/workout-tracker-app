@@ -121,16 +121,6 @@ workout-tracker-app/
 └── README.md           # This file
 ```
 
-## 🤝 Contributing
-
-This is a personal project, but suggestions and feedback are welcome!
-
-1. Fork the repository
-2. Create a feature branch (`git checkout -b feature/AmazingFeature`)
-3. Commit your changes (`git commit -m 'Add some AmazingFeature'`)
-4. Push to the branch (`git push origin feature/AmazingFeature`)
-5. Open a Pull Request
-
 ## 📝 License
 
 MIT License - feel free to use this project for your own workout tracking!
@@ -141,9 +131,6 @@ MIT License - feel free to use this project for your own workout tracking!
 - Inspired by the need for detailed workout tracking and progression analysis
 - Icons provided by Lucide
 
-## 📧 Contact
-
-Created by Cory - Iowa State University Communications
 
 ---
 
