@@ -1,23 +1,55 @@
-# 🏋️ Workout Tracker
+# Workout Tracker
 
-A comprehensive periodized workout tracking application built with React. Track your strength training progress, monitor HRV (Heart Rate Variability), visualize body weight trends, and maintain detailed exercise history.
+A comprehensive periodized workout tracking application built with React. Track your strength training progress, monitor personal records, visualize progression with charts, and fully customize your training templates.
 
-## ✨ Features
+## Features
 
-- **📅 Calendar View**: Weekly workout planning with customizable training blocks
-- **📊 Progress Tracking**: Visualize your workout progression over time
-- **💪 Exercise History**: Search and view detailed history for any exercise
-- **📈 HRV Monitoring**: Track overnight HRV to monitor recovery
-- **⚖️ Body Weight Tracking**: Monitor weight changes throughout training blocks
-- **💾 Data Backup/Restore**: Export and import your workout data
-- **🎯 Multiple Exercise Types**:
-  - Strength training (weight × reps)
-  - Cardio (distance/time)
-  - Tabata intervals
-  - Treadmill workouts
-  - Reps + Time tracking
+### Core Tracking
+- **Calendar View**: Weekly workout planning with customizable training blocks
+- **Exercise Logging**: Track weight, reps, and sets for each exercise
+- **HRV Monitoring**: Track overnight HRV to monitor recovery
+- **Body Weight Tracking**: Monitor weight changes throughout training blocks
 
-## 🚀 Getting Started
+### Progressive Overload System
+- **Previous Session Display**: See your last workout data while logging
+- **Real-time Volume Calculation**: Track total volume (weight × reps) per exercise and workout
+- **Volume Comparison**: Percentage change vs previous session
+- **Visual Indicators**: Improvement arrows and match indicators for each set
+
+### Personal Records (PRs)
+- **Automatic PR Detection**: System detects new PRs when you save a workout
+- **Multiple PR Types**: Max weight, max volume, max reps at weight, estimated 1RM
+- **PR Celebration Modal**: Get notified when you hit new records
+- **PR Dashboard**: View all your personal records in the Progress tab
+
+### Rest Timer
+- **Built-in Timer**: Start rest timer after each set
+- **Fullscreen Mode**: Large countdown display during rest
+- **Browser Notifications**: Get notified when rest is complete
+- **Pause/Resume/Reset**: Full timer controls
+
+### Progress Visualization
+- **Interactive Charts**: View weight, volume, and rep progression over time
+- **Exercise Search**: Find any exercise and see its complete history
+- **Chart Type Selector**: Switch between weight, volume, and reps views
+
+### Template Editor
+- **Full Customization**: Edit block name, weeks, and workout days
+- **Add/Remove Days**: Configure which days you train
+- **Exercise Templates**: Set up default exercises with sets, reps, technique, and rest times
+- **Multiple Workout Types**: Support for strength, cardio, Tabata, and more
+
+### Quick Actions
+- **Copy Last Session**: One-click to copy previous workout data
+- **Add/Remove Sets**: Easily adjust sets during workout
+- **Add/Remove Exercises**: Modify workouts on the fly
+
+### Data Management
+- **Local Storage**: All data saved in browser (no account needed)
+- **Export/Import**: Backup and restore your data as JSON
+- **Offline Support**: Works without internet connection
+
+## Getting Started
 
 ### Prerequisites
 
@@ -28,7 +60,7 @@ A comprehensive periodized workout tracking application built with React. Track 
 
 1. **Clone the repository**
    ```bash
-   git clone https://github.com/YOUR_USERNAME/workout-tracker-app.git
+   git clone https://github.com/Cojomo58/workout-tracker-app.git
    cd workout-tracker-app
    ```
 
@@ -44,94 +76,70 @@ A comprehensive periodized workout tracking application built with React. Track 
 
 4. **Open your browser**
    - Navigate to `http://localhost:5173`
-   - The app should now be running!
 
-## 🛠️ Available Scripts
+## How to Use
 
-- `npm run dev` - Start development server
-- `npm run build` - Build for production
-- `npm run preview` - Preview production build locally
+### Setting Up Your Template
 
-## 📖 How to Use
+1. Go to **Edit Template** tab
+2. Set your block name and number of weeks
+3. Add workout days (Monday-Sunday)
+4. Add exercises to each day with sets, reps, and rest times
 
-### Creating a Workout Log
+### Logging a Workout
 
-1. Navigate to the **Calendar** tab
-2. Select the current week using the week navigation
+1. Go to **Calendar** tab
+2. Select the current week
 3. Click on a day to open the workout log
-4. Fill in:
-   - Workout date
-   - Optional: Overnight HRV reading
-   - Exercise sets, reps, and weights
-5. Click **Save Workout**
+4. Previous session data will display automatically
+5. Enter your weight and reps for each set
+6. Click **Rest** button to start rest timer between sets
+7. Click **Save Workout** when done
 
 ### Viewing Progress
 
-1. Navigate to the **Progress** tab
-2. View:
-   - Total workouts completed
-   - Body weight trends (if tracked)
-   - HRV trends over time
-   - Exercise search and history
+1. Go to **Progress** tab
+2. See workout stats and PR dashboard
+3. Search for any exercise to see:
+   - Progression charts (weight/volume/reps)
+   - Complete session history
+   - Personal records
 
-### Searching Exercise History
-
-1. Go to **Progress** → **Search Exercises**
-2. Type an exercise name
-3. Click on an exercise to see:
-   - Volume progression chart
-   - Max weight progression
-   - Detailed session history
-
-### Backing Up Your Data
+### Backing Up Data
 
 1. Click **Backup/Restore** button
-2. Click **Export Data** to download a JSON backup
-3. Save this file safely
-4. To restore: Click **Import Data** and select your backup file
+2. Click **Export Data** to download JSON backup
+3. To restore: Click **Import Data** and select backup file
 
-## 💾 Data Storage
-
-- All data is stored locally in your browser's localStorage
-- Data persists between sessions
-- Use the export feature to create backups
-- No server or account required
-
-## 🎨 Tech Stack
+## Tech Stack
 
 - **React 18**: UI framework
 - **Vite**: Build tool and dev server
-- **Tailwind CSS**: Utility-first styling
-- **Lucide React**: Icon library
-- **localStorage**: Client-side data persistence
+- **Tailwind CSS**: Styling
+- **Recharts**: Progress visualization charts
+- **Lucide React**: Icons
+- **localStorage**: Data persistence
 
-## 📂 Project Structure
+## Project Structure
 
 ```
 workout-tracker-app/
-├── public/              # Static files
 ├── src/
 │   ├── App.jsx         # Main application component
 │   ├── main.jsx        # Application entry point
-│   └── index.css       # Global styles
+│   └── index.css       # Global styles and animations
 ├── index.html          # HTML template
 ├── package.json        # Dependencies and scripts
 ├── vite.config.js      # Vite configuration
-├── tailwind.config.js  # Tailwind configuration
-└── README.md           # This file
+└── tailwind.config.js  # Tailwind configuration
 ```
 
-## 📝 License
+## Scripts
+
+- `npm run dev` - Start development server
+- `npm run build` - Build for production
+- `npm run preview` - Preview production build
+
+## License
 
 MIT License - feel free to use this project for your own workout tracking!
-
-## 🙏 Acknowledgments
-
-- Built to support periodized training methodologies
-- Inspired by the need for detailed workout tracking and progression analysis
-- Icons provided by Lucide
-
-
----
-
-**Happy lifting! 💪**

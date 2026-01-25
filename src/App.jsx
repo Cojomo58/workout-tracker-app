@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
-import { Plus, ChevronLeft, ChevronRight, TrendingUp, Calendar, Dumbbell, Save, X, History, Clock, Play, Pause, RotateCcw } from 'lucide-react';
-import { LineChart, Line, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
+import { Plus, ChevronLeft, ChevronRight, TrendingUp, Calendar, Dumbbell, Save, X, History, Clock, Play, Pause, RotateCcw, Settings, Trash2, Edit3, Trophy } from 'lucide-react';
+import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
 
 const WorkoutTracker = () => {
   const [view, setView] = useState('calendar');
@@ -78,7 +78,56 @@ const WorkoutTracker = () => {
 
   // Charts State
   const [chartType, setChartType] = useState('weight');
-  const [chartExercise, setChartExercise] = useState(null);
+
+  // Migrate PRs from historical workout data
+  const migrateHistoricalPRs = (logs) => {
+    const migratedPRs = {};
+
+    Object.entries(logs).forEach(([logKey, log]) => {
+      if (!log.exercises || !log.date) return;
+
+      log.exercises.forEach(exercise => {
+        if (!exercise.name || !exercise.sets) return;
+
+        const exerciseName = exercise.name;
+        if (!migratedPRs[exerciseName]) {
+          migratedPRs[exerciseName] = {};
+        }
+
+        exercise.sets.forEach(set => {
+          const weight = parseFloat(set.weight);
+          const reps = parseFloat(set.reps);
+
+          if (!weight || !reps) return;
+
+          const volume = weight * reps;
+          const estimated1RM = Math.round(weight * (1 + reps / 30));
+
+          // Update max weight
+          if (!migratedPRs[exerciseName].maxWeight || weight > migratedPRs[exerciseName].maxWeight.value) {
+            migratedPRs[exerciseName].maxWeight = { value: weight, date: log.date, logKey, reps };
+          }
+
+          // Update max volume
+          if (!migratedPRs[exerciseName].maxVolume || volume > migratedPRs[exerciseName].maxVolume.value) {
+            migratedPRs[exerciseName].maxVolume = { value: volume, date: log.date, logKey, weight, reps };
+          }
+
+          // Update max reps (overall, not per weight)
+          if (!migratedPRs[exerciseName].maxReps || reps > migratedPRs[exerciseName].maxReps.value) {
+            migratedPRs[exerciseName].maxReps = { value: reps, weight, date: log.date, logKey };
+          }
+
+          // Update estimated 1RM
+          if (!migratedPRs[exerciseName].estimated1RM || estimated1RM > migratedPRs[exerciseName].estimated1RM.value) {
+            migratedPRs[exerciseName].estimated1RM = { value: estimated1RM, date: log.date, logKey, weight, reps };
+          }
+        });
+      });
+    });
+
+    return migratedPRs;
+  };
 
   // Load data on mount
   React.useEffect(() => {
@@ -90,11 +139,21 @@ const WorkoutTracker = () => {
         const savedPrefs = localStorage.getItem('workout-preferences');
         const savedPRs = localStorage.getItem('personal-records');
 
-        if (logs) setWorkoutLogs(JSON.parse(logs));
-        if (metrics) setWeeklyMetrics(JSON.parse(metrics));
+        const parsedLogs = logs ? JSON.parse(logs) : {};
+        const parsedMetrics = metrics ? JSON.parse(metrics) : {};
+
+        setWorkoutLogs(parsedLogs);
+        setWeeklyMetrics(parsedMetrics);
         if (savedBlocks) setBlocks(JSON.parse(savedBlocks));
         if (savedPrefs) setPreferences(JSON.parse(savedPrefs));
-        if (savedPRs) setPersonalRecords(JSON.parse(savedPRs));
+
+        // Always recalculate PRs from historical data to ensure all exercises have PRs
+        if (Object.keys(parsedLogs).length > 0) {
+          const migratedPRs = migrateHistoricalPRs(parsedLogs);
+          setPersonalRecords(migratedPRs);
+        } else if (savedPRs) {
+          setPersonalRecords(JSON.parse(savedPRs));
+        }
       } catch (error) {
         console.log('Error loading data:', error);
         setStorageError('Error loading saved data');
@@ -543,8 +602,8 @@ const WorkoutTracker = () => {
         <button
           onClick={() => setView('calendar')}
           className={`px-4 py-3 font-medium transition-colors ${
-            view === 'calendar' 
-              ? 'text-emerald-400 border-b-2 border-emerald-400' 
+            view === 'calendar'
+              ? 'text-emerald-400 border-b-2 border-emerald-400'
               : 'text-gray-400 hover:text-gray-200'
           }`}
         >
@@ -554,13 +613,24 @@ const WorkoutTracker = () => {
         <button
           onClick={() => setView('progress')}
           className={`px-4 py-3 font-medium transition-colors ${
-            view === 'progress' 
-              ? 'text-emerald-400 border-b-2 border-emerald-400' 
+            view === 'progress'
+              ? 'text-emerald-400 border-b-2 border-emerald-400'
               : 'text-gray-400 hover:text-gray-200'
           }`}
         >
           <TrendingUp className="w-4 h-4 inline mr-2" />
           Progress
+        </button>
+        <button
+          onClick={() => setView('template')}
+          className={`px-4 py-3 font-medium transition-colors ${
+            view === 'template'
+              ? 'text-emerald-400 border-b-2 border-emerald-400'
+              : 'text-gray-400 hover:text-gray-200'
+          }`}
+        >
+          <Settings className="w-4 h-4 inline mr-2" />
+          Edit Template
         </button>
       </div>
 
@@ -571,7 +641,7 @@ const WorkoutTracker = () => {
             <h2 className="text-2xl font-bold text-gray-100">Progress Tracker</h2>
             
             <div className="bg-gray-800 p-6 rounded-lg border border-gray-700">
-              <div className="grid grid-cols-2 gap-4">
+              <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
                 <div className="p-4 bg-emerald-950/30 border border-emerald-900/50 rounded-lg">
                   <p className="text-sm text-gray-400">Workouts Completed</p>
                   <p className="text-3xl font-bold text-emerald-400">
@@ -582,56 +652,148 @@ const WorkoutTracker = () => {
                   <p className="text-sm text-gray-400">Current Week</p>
                   <p className="text-3xl font-bold text-blue-400">{currentWeek}</p>
                 </div>
+                {(() => {
+                  const hrvValues = Object.values(workoutLogs)
+                    .filter(log => log.hrv && parseFloat(log.hrv) > 0)
+                    .map(log => parseFloat(log.hrv))
+                    .slice(-7);
+                  const avgHrv = hrvValues.length > 0
+                    ? Math.round(hrvValues.reduce((a, b) => a + b, 0) / hrvValues.length)
+                    : null;
+                  const latestHrv = hrvValues.length > 0 ? hrvValues[hrvValues.length - 1] : null;
+
+                  return (
+                    <>
+                      <div className="p-4 bg-cyan-950/30 border border-cyan-900/50 rounded-lg">
+                        <p className="text-sm text-gray-400">Latest HRV</p>
+                        <p className="text-3xl font-bold text-cyan-400">
+                          {latestHrv ? `${latestHrv}` : '—'}
+                        </p>
+                        <p className="text-xs text-gray-500">ms</p>
+                      </div>
+                      <div className="p-4 bg-purple-950/30 border border-purple-900/50 rounded-lg">
+                        <p className="text-sm text-gray-400">Avg HRV (7d)</p>
+                        <p className="text-3xl font-bold text-purple-400">
+                          {avgHrv ? `${avgHrv}` : '—'}
+                        </p>
+                        <p className="text-xs text-gray-500">ms</p>
+                      </div>
+                    </>
+                  );
+                })()}
               </div>
             </div>
 
-            {/* Personal Records Dashboard */}
-            {Object.keys(personalRecords).length > 0 && (
-              <div className="bg-gray-800 p-4 rounded-lg border border-yellow-600/30">
-                <h3 className="font-semibold text-yellow-400 mb-4 flex items-center gap-2 text-lg">
-                  <TrendingUp className="w-5 h-5" />
-                  Personal Records 🏆
-                </h3>
-                <div className="space-y-4 max-h-96 overflow-y-auto">
-                  {Object.entries(personalRecords).map(([exerciseName, prs]) => (
-                    <div key={exerciseName} className="p-4 bg-gray-900/50 rounded-lg border border-gray-700">
-                      <h4 className="font-semibold text-gray-100 mb-3">{exerciseName}</h4>
-                      <div className="grid grid-cols-2 gap-3 text-sm">
-                        {prs.maxWeight && (
-                          <div className="p-2 bg-gray-800 rounded">
-                            <p className="text-xs text-gray-400">Max Weight</p>
-                            <p className="text-yellow-400 font-medium">
-                              {prs.maxWeight.value} lb × {prs.maxWeight.reps}
-                            </p>
-                            <p className="text-xs text-gray-500">{formatDate(prs.maxWeight.date)}</p>
-                          </div>
-                        )}
-                        {prs.maxVolume && (
-                          <div className="p-2 bg-gray-800 rounded">
-                            <p className="text-xs text-gray-400">Max Volume (Set)</p>
-                            <p className="text-yellow-400 font-medium">
-                              {prs.maxVolume.value.toLocaleString()} lb
-                            </p>
-                            <p className="text-xs text-gray-500">
-                              {prs.maxVolume.weight}lb × {prs.maxVolume.reps}
-                            </p>
-                          </div>
-                        )}
-                        {prs.estimated1RM && (
-                          <div className="p-2 bg-gray-800 rounded">
-                            <p className="text-xs text-gray-400">Est. 1RM</p>
-                            <p className="text-yellow-400 font-medium">{prs.estimated1RM.value} lb</p>
-                            <p className="text-xs text-gray-500">
-                              from {prs.estimated1RM.weight}lb × {prs.estimated1RM.reps}
-                            </p>
-                          </div>
-                        )}
+            {/* HRV History */}
+            {(() => {
+              const hrvHistory = Object.entries(workoutLogs)
+                .filter(([, log]) => log.hrv && parseFloat(log.hrv) > 0 && log.date)
+                .map(([key, log]) => ({
+                  date: log.date,
+                  hrv: parseFloat(log.hrv),
+                  logKey: key
+                }))
+                .sort((a, b) => new Date(a.date) - new Date(b.date))
+                .slice(-14);
+
+              if (hrvHistory.length < 2) return null;
+
+              return (
+                <div className="bg-gray-800 p-4 rounded-lg border border-cyan-600/30">
+                  <h3 className="font-semibold text-cyan-400 mb-4">HRV Trend (Last 14 sessions)</h3>
+                  <div className="p-4 bg-gray-900/50 rounded-lg border border-gray-600">
+                    <ResponsiveContainer width="100%" height={150}>
+                      <LineChart data={hrvHistory.map(h => ({ date: formatDate(h.date), value: h.hrv }))}>
+                        <CartesianGrid strokeDasharray="3 3" stroke="#374151" />
+                        <XAxis dataKey="date" stroke="#9ca3af" tick={{ fill: '#9ca3af', fontSize: 10 }} />
+                        <YAxis stroke="#9ca3af" tick={{ fill: '#9ca3af', fontSize: 10 }} domain={['dataMin - 5', 'dataMax + 5']} />
+                        <Tooltip
+                          contentStyle={{ backgroundColor: '#1f2937', border: '1px solid #374151', borderRadius: '0.5rem', color: '#f3f4f6' }}
+                          formatter={(value) => [`${value} ms`, 'HRV']}
+                        />
+                        <Line type="monotone" dataKey="value" stroke="#22d3ee" strokeWidth={2} dot={{ fill: '#22d3ee', r: 3 }} />
+                      </LineChart>
+                    </ResponsiveContainer>
+                  </div>
+                </div>
+              );
+            })()}
+
+            {/* Weekly Body Weight Tracking */}
+            {(() => {
+              // Get weekly body weight data from weeklyMetrics
+              const weightHistory = Object.entries(weeklyMetrics)
+                .filter(([, data]) => data.bodyWeight && parseFloat(data.bodyWeight) > 0)
+                .map(([key, data]) => {
+                  // Parse week info from key (e.g., "block1-week1")
+                  const match = key.match(/block(\d+)-week(\d+)/);
+                  const weekNum = match ? parseInt(match[2]) : 0;
+                  return {
+                    weekKey: key,
+                    week: weekNum,
+                    weight: parseFloat(data.bodyWeight),
+                    date: data.lastUpdated || `Week ${weekNum}`
+                  };
+                })
+                .sort((a, b) => a.week - b.week);
+
+              const latestWeight = weightHistory.length > 0 ? weightHistory[weightHistory.length - 1].weight : null;
+              const previousWeight = weightHistory.length > 1 ? weightHistory[weightHistory.length - 2].weight : null;
+              const weightChange = latestWeight && previousWeight ? (latestWeight - previousWeight).toFixed(1) : null;
+              const recentHistory = weightHistory.slice(-14);
+
+              return (
+                <>
+                  {/* Body Weight Stats */}
+                  <div className="bg-gray-800 p-4 rounded-lg border border-gray-700">
+                    <h3 className="font-semibold text-gray-100 mb-4">Weekly Body Weight</h3>
+                    <div className="grid grid-cols-2 gap-4">
+                      <div className="p-4 bg-orange-950/30 border border-orange-900/50 rounded-lg">
+                        <p className="text-sm text-gray-400">Current Weight</p>
+                        <p className="text-3xl font-bold text-orange-400">
+                          {latestWeight ? `${latestWeight}` : '—'}
+                        </p>
+                        <p className="text-xs text-gray-500">lb</p>
+                      </div>
+                      <div className="p-4 bg-gray-700/50 border border-gray-600 rounded-lg">
+                        <p className="text-sm text-gray-400">Weekly Change</p>
+                        <p className={`text-3xl font-bold ${
+                          weightChange && parseFloat(weightChange) > 0
+                            ? 'text-red-400'
+                            : weightChange && parseFloat(weightChange) < 0
+                              ? 'text-emerald-400'
+                              : 'text-gray-400'
+                        }`}>
+                          {weightChange ? `${parseFloat(weightChange) > 0 ? '+' : ''}${weightChange}` : '—'}
+                        </p>
+                        <p className="text-xs text-gray-500">lb vs last week</p>
                       </div>
                     </div>
-                  ))}
-                </div>
-              </div>
-            )}
+                  </div>
+
+                  {/* Body Weight Trend Chart */}
+                  {recentHistory.length >= 2 && (
+                    <div className="bg-gray-800 p-4 rounded-lg border border-orange-600/30">
+                      <h3 className="font-semibold text-orange-400 mb-4">Body Weight Trend (By Week)</h3>
+                      <div className="p-4 bg-gray-900/50 rounded-lg border border-gray-600">
+                        <ResponsiveContainer width="100%" height={150}>
+                          <LineChart data={recentHistory.map(h => ({ date: `Wk ${h.week}`, value: h.weight }))}>
+                            <CartesianGrid strokeDasharray="3 3" stroke="#374151" />
+                            <XAxis dataKey="date" stroke="#9ca3af" tick={{ fill: '#9ca3af', fontSize: 10 }} />
+                            <YAxis stroke="#9ca3af" tick={{ fill: '#9ca3af', fontSize: 10 }} domain={['dataMin - 2', 'dataMax + 2']} />
+                            <Tooltip
+                              contentStyle={{ backgroundColor: '#1f2937', border: '1px solid #374151', borderRadius: '0.5rem', color: '#f3f4f6' }}
+                              formatter={(value) => [`${value} lb`, 'Weight']}
+                            />
+                            <Line type="monotone" dataKey="value" stroke="#fb923c" strokeWidth={2} dot={{ fill: '#fb923c', r: 3 }} />
+                          </LineChart>
+                        </ResponsiveContainer>
+                      </div>
+                    </div>
+                  )}
+                </>
+              );
+            })()}
 
             <div className="bg-gray-800 p-4 rounded-lg border border-gray-700">
               <h3 className="font-semibold text-gray-100 mb-3 flex items-center gap-2">
@@ -691,10 +853,7 @@ const WorkoutTracker = () => {
                     {selectedExerciseHistory} History
                   </h3>
                   <button
-                    onClick={() => {
-                      setSelectedExerciseHistory(null);
-                      setChartExercise(null);
-                    }}
+                    onClick={() => setSelectedExerciseHistory(null)}
                     className="p-1 hover:bg-gray-700 rounded text-gray-400"
                   >
                     <X className="w-4 h-4" />
@@ -734,6 +893,60 @@ const WorkoutTracker = () => {
                     Reps
                   </button>
                 </div>
+
+                {/* Personal Records for this Exercise */}
+                {personalRecords[selectedExerciseHistory] && (
+                  <div className="mb-4 p-4 bg-gradient-to-r from-yellow-900/30 to-amber-900/30 rounded-lg border border-yellow-600/50">
+                    <div className="flex items-center gap-2 mb-3">
+                      <Trophy className="w-5 h-5 text-yellow-400" />
+                      <h4 className="font-semibold text-yellow-300">Personal Records</h4>
+                    </div>
+                    <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+                      {personalRecords[selectedExerciseHistory].maxWeight && (
+                        <div className="bg-gray-800/60 rounded-lg p-3 border border-gray-700">
+                          <div className="text-xs text-gray-400 mb-1">Max Weight</div>
+                          <div className="text-lg font-bold text-yellow-400">
+                            {personalRecords[selectedExerciseHistory].maxWeight.value} lb
+                          </div>
+                          <div className="text-xs text-gray-500">
+                            {personalRecords[selectedExerciseHistory].maxWeight.date}
+                          </div>
+                        </div>
+                      )}
+                      {personalRecords[selectedExerciseHistory].maxVolume && (
+                        <div className="bg-gray-800/60 rounded-lg p-3 border border-gray-700">
+                          <div className="text-xs text-gray-400 mb-1">Max Volume</div>
+                          <div className="text-lg font-bold text-emerald-400">
+                            {personalRecords[selectedExerciseHistory].maxVolume.value.toLocaleString()} lb
+                          </div>
+                          <div className="text-xs text-gray-500">
+                            {personalRecords[selectedExerciseHistory].maxVolume.date}
+                          </div>
+                        </div>
+                      )}
+                      {personalRecords[selectedExerciseHistory].maxReps && (
+                        <div className="bg-gray-800/60 rounded-lg p-3 border border-gray-700">
+                          <div className="text-xs text-gray-400 mb-1">Max Reps</div>
+                          <div className="text-lg font-bold text-blue-400">
+                            {personalRecords[selectedExerciseHistory].maxReps.value} reps
+                          </div>
+                          <div className="text-xs text-gray-500">
+                            @ {personalRecords[selectedExerciseHistory].maxReps.weight} lb
+                          </div>
+                        </div>
+                      )}
+                      {personalRecords[selectedExerciseHistory].estimated1RM && (
+                        <div className="bg-gray-800/60 rounded-lg p-3 border border-gray-700">
+                          <div className="text-xs text-gray-400 mb-1">Est. 1RM</div>
+                          <div className="text-lg font-bold text-purple-400">
+                            {personalRecords[selectedExerciseHistory].estimated1RM.value} lb
+                          </div>
+                          <div className="text-xs text-gray-500">Epley formula</div>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                )}
 
                 {/* Chart */}
                 {(() => {
@@ -820,6 +1033,266 @@ const WorkoutTracker = () => {
           </div>
         )}
 
+        {/* Template Editor View */}
+        {view === 'template' && (
+          <div className="space-y-6">
+            <h2 className="text-2xl font-bold text-gray-100">Edit Workout Template</h2>
+            <p className="text-gray-400">Customize your training block, days, and exercises</p>
+
+            {/* Block Settings */}
+            <div className="bg-gray-800 p-4 rounded-lg border border-gray-700">
+              <h3 className="font-semibold text-gray-100 mb-4 flex items-center gap-2">
+                <Edit3 className="w-5 h-5" />
+                Block Settings
+              </h3>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div>
+                  <label className="text-xs text-gray-400 block mb-2">Block Name</label>
+                  <input
+                    type="text"
+                    value={blocks[currentBlock - 1]?.name || ''}
+                    onChange={(e) => {
+                      const newBlocks = [...blocks];
+                      newBlocks[currentBlock - 1].name = e.target.value;
+                      setBlocks(newBlocks);
+                    }}
+                    className="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded-lg text-gray-100"
+                    placeholder="e.g., Block A - Hypertrophy Focus"
+                  />
+                </div>
+                <div>
+                  <label className="text-xs text-gray-400 block mb-2">Number of Weeks</label>
+                  <input
+                    type="number"
+                    min="1"
+                    max="52"
+                    value={blocks[currentBlock - 1]?.weeks || 4}
+                    onChange={(e) => {
+                      const newBlocks = [...blocks];
+                      newBlocks[currentBlock - 1].weeks = parseInt(e.target.value) || 4;
+                      setBlocks(newBlocks);
+                    }}
+                    className="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded-lg text-gray-100"
+                  />
+                </div>
+              </div>
+            </div>
+
+            {/* Day Templates */}
+            <div className="space-y-4">
+              <div className="flex items-center justify-between">
+                <h3 className="font-semibold text-gray-100">Workout Days</h3>
+                <button
+                  onClick={() => {
+                    const newBlocks = [...blocks];
+                    const template = newBlocks[currentBlock - 1].template;
+                    const existingDays = Object.keys(template);
+                    const allDays = ['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday'];
+                    const availableDays = allDays.filter(d => !existingDays.includes(d));
+
+                    if (availableDays.length > 0) {
+                      template[availableDays[0]] = {
+                        name: 'New Workout',
+                        exercises: []
+                      };
+                      setBlocks(newBlocks);
+                    }
+                  }}
+                  className="px-3 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-sm flex items-center gap-2"
+                >
+                  <Plus className="w-4 h-4" />
+                  Add Day
+                </button>
+              </div>
+
+              {Object.entries(blocks[currentBlock - 1]?.template || {}).map(([dayKey, dayData]) => (
+                <div key={dayKey} className="bg-gray-800 p-4 rounded-lg border border-gray-700">
+                  <div className="flex items-center justify-between mb-4">
+                    <div className="flex items-center gap-3 flex-1">
+                      <select
+                        value={dayKey}
+                        onChange={(e) => {
+                          const newBlocks = [...blocks];
+                          const template = newBlocks[currentBlock - 1].template;
+                          const newDayKey = e.target.value;
+                          if (newDayKey !== dayKey && !template[newDayKey]) {
+                            template[newDayKey] = template[dayKey];
+                            delete template[dayKey];
+                            setBlocks(newBlocks);
+                          }
+                        }}
+                        className="px-3 py-2 bg-gray-700 border border-gray-600 rounded-lg text-gray-100 font-medium"
+                      >
+                        {['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday'].map(d => (
+                          <option key={d} value={d} disabled={d !== dayKey && blocks[currentBlock - 1]?.template[d]}>
+                            {d.charAt(0).toUpperCase() + d.slice(1)}
+                          </option>
+                        ))}
+                      </select>
+                      <input
+                        type="text"
+                        value={dayData.name}
+                        onChange={(e) => {
+                          const newBlocks = [...blocks];
+                          newBlocks[currentBlock - 1].template[dayKey].name = e.target.value;
+                          setBlocks(newBlocks);
+                        }}
+                        className="flex-1 px-3 py-2 bg-gray-700 border border-gray-600 rounded-lg text-gray-100"
+                        placeholder="Workout name (e.g., Upper Body Push)"
+                      />
+                    </div>
+                    <button
+                      onClick={() => {
+                        if (window.confirm(`Remove ${dayKey.charAt(0).toUpperCase() + dayKey.slice(1)} from template?`)) {
+                          const newBlocks = [...blocks];
+                          delete newBlocks[currentBlock - 1].template[dayKey];
+                          setBlocks(newBlocks);
+                        }
+                      }}
+                      className="ml-3 p-2 bg-red-600/20 hover:bg-red-600/30 text-red-400 rounded-lg"
+                    >
+                      <Trash2 className="w-4 h-4" />
+                    </button>
+                  </div>
+
+                  {/* Exercises for this day */}
+                  <div className="space-y-3">
+                    <p className="text-xs text-gray-400 font-medium">Exercises:</p>
+                    {dayData.exercises.map((exercise, exIdx) => (
+                      <div key={exIdx} className="p-3 bg-gray-900/50 rounded-lg border border-gray-600">
+                        <div className="flex items-start gap-2 mb-2">
+                          <input
+                            type="text"
+                            value={exercise.name}
+                            onChange={(e) => {
+                              const newBlocks = [...blocks];
+                              newBlocks[currentBlock - 1].template[dayKey].exercises[exIdx].name = e.target.value;
+                              setBlocks(newBlocks);
+                            }}
+                            className="flex-1 px-3 py-2 bg-gray-700 border border-gray-600 rounded-lg text-gray-100 text-sm"
+                            placeholder="Exercise name"
+                          />
+                          <button
+                            onClick={() => {
+                              const newBlocks = [...blocks];
+                              newBlocks[currentBlock - 1].template[dayKey].exercises = dayData.exercises.filter((_, i) => i !== exIdx);
+                              setBlocks(newBlocks);
+                            }}
+                            className="p-2 hover:bg-red-600/20 text-red-400 rounded"
+                          >
+                            <X className="w-4 h-4" />
+                          </button>
+                        </div>
+                        <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
+                          <div>
+                            <label className="text-xs text-gray-500">Sets</label>
+                            <input
+                              type="text"
+                              value={exercise.sets}
+                              onChange={(e) => {
+                                const newBlocks = [...blocks];
+                                newBlocks[currentBlock - 1].template[dayKey].exercises[exIdx].sets = e.target.value;
+                                setBlocks(newBlocks);
+                              }}
+                              className="w-full px-2 py-1 bg-gray-700 border border-gray-600 rounded text-gray-100 text-sm"
+                              placeholder="3"
+                            />
+                          </div>
+                          <div>
+                            <label className="text-xs text-gray-500">Reps</label>
+                            <input
+                              type="text"
+                              value={exercise.reps}
+                              onChange={(e) => {
+                                const newBlocks = [...blocks];
+                                newBlocks[currentBlock - 1].template[dayKey].exercises[exIdx].reps = e.target.value;
+                                setBlocks(newBlocks);
+                              }}
+                              className="w-full px-2 py-1 bg-gray-700 border border-gray-600 rounded text-gray-100 text-sm"
+                              placeholder="8-12"
+                            />
+                          </div>
+                          <div>
+                            <label className="text-xs text-gray-500">Technique</label>
+                            <input
+                              type="text"
+                              value={exercise.technique || ''}
+                              onChange={(e) => {
+                                const newBlocks = [...blocks];
+                                newBlocks[currentBlock - 1].template[dayKey].exercises[exIdx].technique = e.target.value;
+                                setBlocks(newBlocks);
+                              }}
+                              className="w-full px-2 py-1 bg-gray-700 border border-gray-600 rounded text-gray-100 text-sm"
+                              placeholder="Failure"
+                            />
+                          </div>
+                          <div>
+                            <label className="text-xs text-gray-500">Rest</label>
+                            <input
+                              type="text"
+                              value={exercise.rest || ''}
+                              onChange={(e) => {
+                                const newBlocks = [...blocks];
+                                newBlocks[currentBlock - 1].template[dayKey].exercises[exIdx].rest = e.target.value;
+                                setBlocks(newBlocks);
+                              }}
+                              className="w-full px-2 py-1 bg-gray-700 border border-gray-600 rounded text-gray-100 text-sm"
+                              placeholder="2-3 min"
+                            />
+                          </div>
+                        </div>
+                      </div>
+                    ))}
+
+                    <button
+                      onClick={() => {
+                        const newBlocks = [...blocks];
+                        newBlocks[currentBlock - 1].template[dayKey].exercises.push({
+                          name: '',
+                          sets: '3',
+                          reps: '8-12',
+                          technique: '',
+                          rest: '2-3 min'
+                        });
+                        setBlocks(newBlocks);
+                      }}
+                      className="w-full py-2 px-3 bg-gray-700 hover:bg-gray-600 text-gray-300 text-sm rounded-lg flex items-center justify-center gap-2"
+                    >
+                      <Plus className="w-4 h-4" />
+                      Add Exercise
+                    </button>
+                  </div>
+                </div>
+              ))}
+            </div>
+
+            {/* Reset Template */}
+            <div className="pt-4 border-t border-gray-700">
+              <button
+                onClick={() => {
+                  if (window.confirm('Reset template to default? This will clear all your custom workout days and exercises.')) {
+                    const newBlocks = [...blocks];
+                    newBlocks[currentBlock - 1] = {
+                      id: 1,
+                      name: 'Block A - Hypertrophy Focus',
+                      weeks: 4,
+                      template: {
+                        monday: { name: 'Upper Body (Push Focus)', exercises: [] },
+                        wednesday: { name: 'Lower Body', exercises: [] },
+                        friday: { name: 'Upper Body (Pull Focus)', exercises: [] }
+                      }
+                    };
+                    setBlocks(newBlocks);
+                  }
+                }}
+                className="px-4 py-2 bg-red-600/20 hover:bg-red-600/30 text-red-400 rounded-lg text-sm"
+              >
+                Reset to Default Template
+              </button>
+            </div>
+          </div>
+        )}
+
         {/* Calendar View */}
         {view === 'calendar' && (
           <div className="space-y-6">
@@ -854,12 +1327,16 @@ const WorkoutTracker = () => {
                 <label className="text-xs text-gray-400 block mb-1">Body Weight (lbs)</label>
                 <input
                   type="text"
-                  value={weeklyMetrics[`block${currentBlock}-week${currentWeek}`]?.bodyweight || ''}
+                  value={weeklyMetrics[`block${currentBlock}-week${currentWeek}`]?.bodyWeight || ''}
                   onChange={(e) => {
                     const weekKey = `block${currentBlock}-week${currentWeek}`;
                     setWeeklyMetrics({
                       ...weeklyMetrics,
-                      [weekKey]: { bodyweight: e.target.value }
+                      [weekKey]: {
+                        ...weeklyMetrics[weekKey],
+                        bodyWeight: e.target.value,
+                        lastUpdated: new Date().toISOString().split('T')[0]
+                      }
                     });
                   }}
                   placeholder="e.g., 185.5"
@@ -881,7 +1358,7 @@ const WorkoutTracker = () => {
                     onClick={() => {
                       setSelectedDay(day);
                       const existingLog = workoutLogs[logKey];
-                      
+
                       if (existingLog) {
                         setLogDate(existingLog.date);
                         setLogHrv(existingLog.hrv || '');
@@ -892,9 +1369,9 @@ const WorkoutTracker = () => {
                         setExercises(workout?.exercises.map(ex => ({
                           name: ex.name,
                           technique: ex.technique,
-                          sets: Array(parseInt(ex.sets) || 3).fill(null).map(() => ({ 
-                            weight: '', 
-                            reps: '' 
+                          sets: Array(parseInt(ex.sets) || 3).fill(null).map(() => ({
+                            weight: '',
+                            reps: ''
                           })),
                           notes: ''
                         })) || []);
@@ -958,7 +1435,7 @@ const WorkoutTracker = () => {
 
             <div className="bg-gray-800 p-4 rounded-lg border border-gray-700">
               <h3 className="text-sm font-medium text-gray-300 mb-3">Session Info</h3>
-              <div className="grid grid-cols-2 gap-4">
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                 <div>
                   <label className="text-xs text-gray-400 block mb-2">Workout Date</label>
                   <input
@@ -1192,6 +1669,7 @@ const WorkoutTracker = () => {
             <button
               onClick={() => {
                 const logKey = `block${currentBlock}-week${currentWeek}-${selectedDay}`;
+                const weekKey = `block${currentBlock}-week${currentWeek}`;
 
                 // Check for PRs in all exercises
                 const allPRs = [];
