@@ -1,4 +1,4 @@
-# Workout Tracker
+b# Workout Tracker
 
 A comprehensive periodized workout tracking application built with React. Track your strength training progress, monitor personal records, visualize progression with charts, and fully customize your training templates.
 

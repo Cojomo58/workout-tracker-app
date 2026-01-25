@@ -83,6 +83,24 @@ const WorkoutTracker = () => {
   const migrateHistoricalPRs = (logs) => {
     const migratedPRs = {};
 
+    // Helper for time parsing during migration
+    const parseTime = (timeStr) => {
+      if (!timeStr) return 0;
+      const parts = timeStr.split(':').map(p => parseInt(p) || 0);
+      if (parts.length === 3) return parts[0] * 3600 + parts[1] * 60 + parts[2];
+      if (parts.length === 2) return parts[0] * 60 + parts[1];
+      return parseInt(timeStr) || 0;
+    };
+
+    const formatTime = (seconds) => {
+      if (!seconds || seconds <= 0) return '0:00';
+      const hrs = Math.floor(seconds / 3600);
+      const mins = Math.floor((seconds % 3600) / 60);
+      const secs = Math.round(seconds % 60);
+      if (hrs > 0) return `${hrs}:${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
+      return `${mins}:${secs.toString().padStart(2, '0')}`;
+    };
+
     Object.entries(logs).forEach(([logKey, log]) => {
       if (!log.exercises || !log.date) return;
 
@@ -90,39 +108,90 @@ const WorkoutTracker = () => {
         if (!exercise.name || !exercise.sets) return;
 
         const exerciseName = exercise.name;
+        const exerciseType = exercise.type || 'strength';
+
         if (!migratedPRs[exerciseName]) {
           migratedPRs[exerciseName] = {};
         }
 
-        exercise.sets.forEach(set => {
-          const weight = parseFloat(set.weight);
-          const reps = parseFloat(set.reps);
+        if (exerciseType === 'cardio') {
+          // Cardio PR migration
+          exercise.sets.forEach(set => {
+            const distance = parseFloat(set.distance);
+            const timeSeconds = parseTime(set.time);
 
-          if (!weight || !reps) return;
+            if (!distance || !timeSeconds) return;
 
-          const volume = weight * reps;
-          const estimated1RM = Math.round(weight * (1 + reps / 30));
+            const paceSeconds = timeSeconds / distance;
 
-          // Update max weight
-          if (!migratedPRs[exerciseName].maxWeight || weight > migratedPRs[exerciseName].maxWeight.value) {
-            migratedPRs[exerciseName].maxWeight = { value: weight, date: log.date, logKey, reps };
-          }
+            // Update max distance
+            if (!migratedPRs[exerciseName].maxDistance || distance > migratedPRs[exerciseName].maxDistance.value) {
+              migratedPRs[exerciseName].maxDistance = {
+                value: distance,
+                unit: set.unit || 'miles',
+                time: set.time,
+                date: log.date,
+                logKey
+              };
+            }
 
-          // Update max volume
-          if (!migratedPRs[exerciseName].maxVolume || volume > migratedPRs[exerciseName].maxVolume.value) {
-            migratedPRs[exerciseName].maxVolume = { value: volume, date: log.date, logKey, weight, reps };
-          }
+            // Update fastest pace
+            if (!migratedPRs[exerciseName].fastestPace || paceSeconds < migratedPRs[exerciseName].fastestPace.value) {
+              migratedPRs[exerciseName].fastestPace = {
+                value: paceSeconds,
+                displayValue: formatTime(Math.round(paceSeconds)),
+                distance,
+                unit: set.unit || 'miles',
+                time: set.time,
+                date: log.date,
+                logKey
+              };
+            }
 
-          // Update max reps (overall, not per weight)
-          if (!migratedPRs[exerciseName].maxReps || reps > migratedPRs[exerciseName].maxReps.value) {
-            migratedPRs[exerciseName].maxReps = { value: reps, weight, date: log.date, logKey };
-          }
+            // Update longest duration
+            if (!migratedPRs[exerciseName].longestDuration || timeSeconds > migratedPRs[exerciseName].longestDuration.value) {
+              migratedPRs[exerciseName].longestDuration = {
+                value: timeSeconds,
+                displayValue: set.time,
+                distance,
+                unit: set.unit || 'miles',
+                date: log.date,
+                logKey
+              };
+            }
+          });
+        } else {
+          // Strength PR migration
+          exercise.sets.forEach(set => {
+            const weight = parseFloat(set.weight);
+            const reps = parseFloat(set.reps);
 
-          // Update estimated 1RM
-          if (!migratedPRs[exerciseName].estimated1RM || estimated1RM > migratedPRs[exerciseName].estimated1RM.value) {
-            migratedPRs[exerciseName].estimated1RM = { value: estimated1RM, date: log.date, logKey, weight, reps };
-          }
-        });
+            if (!weight || !reps) return;
+
+            const volume = weight * reps;
+            const estimated1RM = Math.round(weight * (1 + reps / 30));
+
+            // Update max weight
+            if (!migratedPRs[exerciseName].maxWeight || weight > migratedPRs[exerciseName].maxWeight.value) {
+              migratedPRs[exerciseName].maxWeight = { value: weight, date: log.date, logKey, reps };
+            }
+
+            // Update max volume
+            if (!migratedPRs[exerciseName].maxVolume || volume > migratedPRs[exerciseName].maxVolume.value) {
+              migratedPRs[exerciseName].maxVolume = { value: volume, date: log.date, logKey, weight, reps };
+            }
+
+            // Update max reps (overall, not per weight)
+            if (!migratedPRs[exerciseName].maxReps || reps > migratedPRs[exerciseName].maxReps.value) {
+              migratedPRs[exerciseName].maxReps = { value: reps, weight, date: log.date, logKey };
+            }
+
+            // Update estimated 1RM
+            if (!migratedPRs[exerciseName].estimated1RM || estimated1RM > migratedPRs[exerciseName].estimated1RM.value) {
+              migratedPRs[exerciseName].estimated1RM = { value: estimated1RM, date: log.date, logKey, weight, reps };
+            }
+          });
+        }
       });
     });
 
@@ -290,6 +359,49 @@ const WorkoutTracker = () => {
     return `${mins}:${secs.toString().padStart(2, '0')}`;
   };
 
+  // Cardio Utility Functions
+  const parseTimeToSeconds = (timeStr) => {
+    if (!timeStr) return 0;
+    const parts = timeStr.split(':').map(p => parseInt(p) || 0);
+    if (parts.length === 3) { // HH:MM:SS
+      return parts[0] * 3600 + parts[1] * 60 + parts[2];
+    } else if (parts.length === 2) { // MM:SS
+      return parts[0] * 60 + parts[1];
+    }
+    return parseInt(timeStr) || 0; // Assume seconds
+  };
+
+  const formatSecondsToTime = (seconds) => {
+    if (!seconds || seconds <= 0) return '0:00';
+    const hrs = Math.floor(seconds / 3600);
+    const mins = Math.floor((seconds % 3600) / 60);
+    const secs = Math.round(seconds % 60);
+    if (hrs > 0) {
+      return `${hrs}:${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
+    }
+    return `${mins}:${secs.toString().padStart(2, '0')}`;
+  };
+
+  const calculatePace = (timeSeconds, distance) => {
+    if (!timeSeconds || !distance || distance <= 0) return null;
+    const paceSeconds = timeSeconds / parseFloat(distance);
+    return formatSecondsToTime(Math.round(paceSeconds));
+  };
+
+  const calculateTotalDistance = (sets) => {
+    if (!sets || !Array.isArray(sets)) return 0;
+    return sets.reduce((total, set) => {
+      return total + (parseFloat(set.distance) || 0);
+    }, 0);
+  };
+
+  const calculateTotalDuration = (sets) => {
+    if (!sets || !Array.isArray(sets)) return 0;
+    return sets.reduce((total, set) => {
+      return total + parseTimeToSeconds(set.time);
+    }, 0);
+  };
+
   // Personal Records Functions
   const calculateEstimated1RM = (weight, reps) => {
     if (!weight || !reps || reps < 1) return 0;
@@ -297,10 +409,67 @@ const WorkoutTracker = () => {
     return Math.round(parseFloat(weight) * (1 + parseFloat(reps) / 30));
   };
 
-  const checkForPRs = (exerciseName, sets, logDate) => {
+  const checkForPRs = (exerciseName, sets, logDate, exerciseType = 'strength') => {
     const prsDetected = [];
     const currentPRs = personalRecords[exerciseName] || {};
 
+    if (exerciseType === 'cardio') {
+      // Cardio PR checks
+      sets.forEach(set => {
+        const distance = parseFloat(set.distance);
+        const timeSeconds = parseTimeToSeconds(set.time);
+
+        if (!distance || !timeSeconds) return;
+
+        const paceSeconds = timeSeconds / distance;
+
+        // Check max distance PR (single entry)
+        if (!currentPRs.maxDistance || distance > currentPRs.maxDistance.value) {
+          prsDetected.push({
+            type: 'maxDistance',
+            exerciseName,
+            value: distance,
+            unit: set.unit || 'miles',
+            time: set.time,
+            previous: currentPRs.maxDistance?.value || 0,
+            date: logDate
+          });
+        }
+
+        // Check fastest pace PR (lower is better)
+        if (!currentPRs.fastestPace || paceSeconds < currentPRs.fastestPace.value) {
+          prsDetected.push({
+            type: 'fastestPace',
+            exerciseName,
+            value: paceSeconds,
+            displayValue: calculatePace(timeSeconds, distance),
+            distance,
+            unit: set.unit || 'miles',
+            time: set.time,
+            previous: currentPRs.fastestPace?.value || Infinity,
+            date: logDate
+          });
+        }
+
+        // Check longest duration PR
+        if (!currentPRs.longestDuration || timeSeconds > currentPRs.longestDuration.value) {
+          prsDetected.push({
+            type: 'longestDuration',
+            exerciseName,
+            value: timeSeconds,
+            displayValue: set.time,
+            distance,
+            unit: set.unit || 'miles',
+            previous: currentPRs.longestDuration?.value || 0,
+            date: logDate
+          });
+        }
+      });
+
+      return prsDetected;
+    }
+
+    // Strength PR checks
     sets.forEach(set => {
       const weight = parseFloat(set.weight);
       const reps = parseFloat(set.reps);
@@ -365,40 +534,87 @@ const WorkoutTracker = () => {
     return prsDetected;
   };
 
-  const updatePRs = (exerciseName, sets, logDate, logKey) => {
+  const updatePRs = (exerciseName, sets, logDate, logKey, exerciseType = 'strength') => {
     const currentPRs = personalRecords[exerciseName] || {};
     const updatedPRs = { ...currentPRs };
 
-    sets.forEach(set => {
-      const weight = parseFloat(set.weight);
-      const reps = parseFloat(set.reps);
+    if (exerciseType === 'cardio') {
+      sets.forEach(set => {
+        const distance = parseFloat(set.distance);
+        const timeSeconds = parseTimeToSeconds(set.time);
 
-      if (!weight || !reps) return;
+        if (!distance || !timeSeconds) return;
 
-      const volume = weight * reps;
-      const estimated1RM = calculateEstimated1RM(weight, reps);
+        const paceSeconds = timeSeconds / distance;
 
-      // Update max weight
-      if (!updatedPRs.maxWeight || weight > updatedPRs.maxWeight.value) {
-        updatedPRs.maxWeight = { value: weight, date: logDate, logKey, reps };
-      }
+        // Update max distance
+        if (!updatedPRs.maxDistance || distance > updatedPRs.maxDistance.value) {
+          updatedPRs.maxDistance = {
+            value: distance,
+            unit: set.unit || 'miles',
+            time: set.time,
+            date: logDate,
+            logKey
+          };
+        }
 
-      // Update max volume
-      if (!updatedPRs.maxVolume || volume > updatedPRs.maxVolume.value) {
-        updatedPRs.maxVolume = { value: volume, date: logDate, logKey, weight, reps };
-      }
+        // Update fastest pace
+        if (!updatedPRs.fastestPace || paceSeconds < updatedPRs.fastestPace.value) {
+          updatedPRs.fastestPace = {
+            value: paceSeconds,
+            displayValue: calculatePace(timeSeconds, distance),
+            distance,
+            unit: set.unit || 'miles',
+            time: set.time,
+            date: logDate,
+            logKey
+          };
+        }
 
-      // Update max reps at weight
-      const maxRepsKey = `maxRepsAt${Math.floor(weight)}`;
-      if (!updatedPRs[maxRepsKey] || reps > updatedPRs[maxRepsKey].reps) {
-        updatedPRs[maxRepsKey] = { reps, weight, date: logDate, logKey };
-      }
+        // Update longest duration
+        if (!updatedPRs.longestDuration || timeSeconds > updatedPRs.longestDuration.value) {
+          updatedPRs.longestDuration = {
+            value: timeSeconds,
+            displayValue: set.time,
+            distance,
+            unit: set.unit || 'miles',
+            date: logDate,
+            logKey
+          };
+        }
+      });
+    } else {
+      sets.forEach(set => {
+        const weight = parseFloat(set.weight);
+        const reps = parseFloat(set.reps);
 
-      // Update estimated 1RM
-      if (!updatedPRs.estimated1RM || estimated1RM > updatedPRs.estimated1RM.value) {
-        updatedPRs.estimated1RM = { value: estimated1RM, date: logDate, logKey, weight, reps };
-      }
-    });
+        if (!weight || !reps) return;
+
+        const volume = weight * reps;
+        const estimated1RM = calculateEstimated1RM(weight, reps);
+
+        // Update max weight
+        if (!updatedPRs.maxWeight || weight > updatedPRs.maxWeight.value) {
+          updatedPRs.maxWeight = { value: weight, date: logDate, logKey, reps };
+        }
+
+        // Update max volume
+        if (!updatedPRs.maxVolume || volume > updatedPRs.maxVolume.value) {
+          updatedPRs.maxVolume = { value: volume, date: logDate, logKey, weight, reps };
+        }
+
+        // Update max reps at weight
+        const maxRepsKey = `maxRepsAt${Math.floor(weight)}`;
+        if (!updatedPRs[maxRepsKey] || reps > updatedPRs[maxRepsKey].reps) {
+          updatedPRs[maxRepsKey] = { reps, weight, date: logDate, logKey };
+        }
+
+        // Update estimated 1RM
+        if (!updatedPRs.estimated1RM || estimated1RM > updatedPRs.estimated1RM.value) {
+          updatedPRs.estimated1RM = { value: estimated1RM, date: logDate, logKey, weight, reps };
+        }
+      });
+    }
 
     setPersonalRecords({
       ...personalRecords,
@@ -414,16 +630,39 @@ const WorkoutTracker = () => {
       .reverse() // Chronological order for charts
       .map(entry => {
         let value = 0;
+        const exerciseType = entry.type || 'strength';
 
-        if (type === 'weight') {
-          // Max weight in the session
-          value = Math.max(...entry.sets.map(s => parseFloat(s.weight) || 0));
-        } else if (type === 'volume') {
-          // Total volume for the session
-          value = calculateVolume(entry.sets);
-        } else if (type === 'reps') {
-          // Max reps in the session
-          value = Math.max(...entry.sets.map(s => parseFloat(s.reps) || 0));
+        if (exerciseType === 'cardio') {
+          // Cardio chart types
+          if (type === 'distance') {
+            // Total distance in session
+            value = calculateTotalDistance(entry.sets);
+          } else if (type === 'pace') {
+            // Best pace in session (lowest pace = fastest)
+            const paces = entry.sets
+              .map(s => {
+                const d = parseFloat(s.distance);
+                const t = parseTimeToSeconds(s.time);
+                return d && t ? t / d : Infinity;
+              })
+              .filter(p => p !== Infinity);
+            value = paces.length > 0 ? Math.min(...paces) : 0;
+          } else if (type === 'duration') {
+            // Total duration in session (in minutes for display)
+            value = calculateTotalDuration(entry.sets) / 60;
+          }
+        } else {
+          // Strength chart types
+          if (type === 'weight') {
+            // Max weight in the session
+            value = Math.max(...entry.sets.map(s => parseFloat(s.weight) || 0));
+          } else if (type === 'volume') {
+            // Total volume for the session
+            value = calculateVolume(entry.sets);
+          } else if (type === 'reps') {
+            // Max reps in the session
+            value = Math.max(...entry.sets.map(s => parseFloat(s.reps) || 0));
+          }
         }
 
         return {
@@ -860,39 +1099,83 @@ const WorkoutTracker = () => {
                   </button>
                 </div>
 
-                {/* Chart Type Selector */}
-                <div className="flex gap-2 mb-4">
-                  <button
-                    onClick={() => setChartType('weight')}
-                    className={`px-3 py-1 rounded text-sm transition-colors ${
-                      chartType === 'weight'
-                        ? 'bg-emerald-600 text-white'
-                        : 'bg-gray-700 text-gray-300 hover:bg-gray-600'
-                    }`}
-                  >
-                    Weight
-                  </button>
-                  <button
-                    onClick={() => setChartType('volume')}
-                    className={`px-3 py-1 rounded text-sm transition-colors ${
-                      chartType === 'volume'
-                        ? 'bg-emerald-600 text-white'
-                        : 'bg-gray-700 text-gray-300 hover:bg-gray-600'
-                    }`}
-                  >
-                    Volume
-                  </button>
-                  <button
-                    onClick={() => setChartType('reps')}
-                    className={`px-3 py-1 rounded text-sm transition-colors ${
-                      chartType === 'reps'
-                        ? 'bg-emerald-600 text-white'
-                        : 'bg-gray-700 text-gray-300 hover:bg-gray-600'
-                    }`}
-                  >
-                    Reps
-                  </button>
-                </div>
+                {/* Chart Type Selector - Dynamic based on exercise type */}
+                {(() => {
+                  const history = getAllExerciseHistory(selectedExerciseHistory);
+                  const exerciseType = history.length > 0 ? (history[0].type || 'strength') : 'strength';
+
+                  if (exerciseType === 'cardio') {
+                    return (
+                      <div className="flex gap-2 mb-4">
+                        <button
+                          onClick={() => setChartType('distance')}
+                          className={`px-3 py-1 rounded text-sm transition-colors ${
+                            chartType === 'distance'
+                              ? 'bg-blue-600 text-white'
+                              : 'bg-gray-700 text-gray-300 hover:bg-gray-600'
+                          }`}
+                        >
+                          Distance
+                        </button>
+                        <button
+                          onClick={() => setChartType('pace')}
+                          className={`px-3 py-1 rounded text-sm transition-colors ${
+                            chartType === 'pace'
+                              ? 'bg-blue-600 text-white'
+                              : 'bg-gray-700 text-gray-300 hover:bg-gray-600'
+                          }`}
+                        >
+                          Pace
+                        </button>
+                        <button
+                          onClick={() => setChartType('duration')}
+                          className={`px-3 py-1 rounded text-sm transition-colors ${
+                            chartType === 'duration'
+                              ? 'bg-blue-600 text-white'
+                              : 'bg-gray-700 text-gray-300 hover:bg-gray-600'
+                          }`}
+                        >
+                          Duration
+                        </button>
+                      </div>
+                    );
+                  }
+
+                  return (
+                    <div className="flex gap-2 mb-4">
+                      <button
+                        onClick={() => setChartType('weight')}
+                        className={`px-3 py-1 rounded text-sm transition-colors ${
+                          chartType === 'weight'
+                            ? 'bg-emerald-600 text-white'
+                            : 'bg-gray-700 text-gray-300 hover:bg-gray-600'
+                        }`}
+                      >
+                        Weight
+                      </button>
+                      <button
+                        onClick={() => setChartType('volume')}
+                        className={`px-3 py-1 rounded text-sm transition-colors ${
+                          chartType === 'volume'
+                            ? 'bg-emerald-600 text-white'
+                            : 'bg-gray-700 text-gray-300 hover:bg-gray-600'
+                        }`}
+                      >
+                        Volume
+                      </button>
+                      <button
+                        onClick={() => setChartType('reps')}
+                        className={`px-3 py-1 rounded text-sm transition-colors ${
+                          chartType === 'reps'
+                            ? 'bg-emerald-600 text-white'
+                            : 'bg-gray-700 text-gray-300 hover:bg-gray-600'
+                        }`}
+                      >
+                        Reps
+                      </button>
+                    </div>
+                  );
+                })()}
 
                 {/* Personal Records for this Exercise */}
                 {personalRecords[selectedExerciseHistory] && (
@@ -902,6 +1185,41 @@ const WorkoutTracker = () => {
                       <h4 className="font-semibold text-yellow-300">Personal Records</h4>
                     </div>
                     <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+                      {/* Cardio PRs */}
+                      {personalRecords[selectedExerciseHistory].maxDistance && (
+                        <div className="bg-gray-800/60 rounded-lg p-3 border border-gray-700">
+                          <div className="text-xs text-gray-400 mb-1">Max Distance</div>
+                          <div className="text-lg font-bold text-blue-400">
+                            {personalRecords[selectedExerciseHistory].maxDistance.value} {personalRecords[selectedExerciseHistory].maxDistance.unit || 'mi'}
+                          </div>
+                          <div className="text-xs text-gray-500">
+                            {personalRecords[selectedExerciseHistory].maxDistance.date}
+                          </div>
+                        </div>
+                      )}
+                      {personalRecords[selectedExerciseHistory].fastestPace && (
+                        <div className="bg-gray-800/60 rounded-lg p-3 border border-gray-700">
+                          <div className="text-xs text-gray-400 mb-1">Fastest Pace</div>
+                          <div className="text-lg font-bold text-cyan-400">
+                            {personalRecords[selectedExerciseHistory].fastestPace.displayValue}/{personalRecords[selectedExerciseHistory].fastestPace.unit === 'km' ? 'km' : 'mi'}
+                          </div>
+                          <div className="text-xs text-gray-500">
+                            {personalRecords[selectedExerciseHistory].fastestPace.date}
+                          </div>
+                        </div>
+                      )}
+                      {personalRecords[selectedExerciseHistory].longestDuration && (
+                        <div className="bg-gray-800/60 rounded-lg p-3 border border-gray-700">
+                          <div className="text-xs text-gray-400 mb-1">Longest Duration</div>
+                          <div className="text-lg font-bold text-purple-400">
+                            {personalRecords[selectedExerciseHistory].longestDuration.displayValue}
+                          </div>
+                          <div className="text-xs text-gray-500">
+                            {personalRecords[selectedExerciseHistory].longestDuration.date}
+                          </div>
+                        </div>
+                      )}
+                      {/* Strength PRs */}
                       {personalRecords[selectedExerciseHistory].maxWeight && (
                         <div className="bg-gray-800/60 rounded-lg p-3 border border-gray-700">
                           <div className="text-xs text-gray-400 mb-1">Max Weight</div>
@@ -986,9 +1304,16 @@ const WorkoutTracker = () => {
                                 return [`${value.toLocaleString()} lb`, 'Volume'];
                               } else if (chartType === 'weight') {
                                 return [`${value} lb`, 'Max Weight'];
-                              } else {
+                              } else if (chartType === 'reps') {
                                 return [`${value}`, 'Max Reps'];
+                              } else if (chartType === 'distance') {
+                                return [`${value.toFixed(2)} mi`, 'Distance'];
+                              } else if (chartType === 'pace') {
+                                return [`${formatSecondsToTime(Math.round(value))}/mi`, 'Pace'];
+                              } else if (chartType === 'duration') {
+                                return [`${value.toFixed(0)} min`, 'Duration'];
                               }
+                              return [value, 'Value'];
                             }}
                           />
                           <Line
@@ -1006,27 +1331,49 @@ const WorkoutTracker = () => {
                 })()}
 
                 <div className="space-y-3 max-h-96 overflow-y-auto">
-                  {getAllExerciseHistory(selectedExerciseHistory).map((entry, idx) => (
-                    <div key={idx} className="p-3 bg-gray-700 rounded-lg border border-gray-600">
-                      <div className="flex items-center justify-between mb-2">
-                        <span className="text-sm font-medium text-gray-100">
-                          {formatDate(entry.date)}
-                        </span>
+                  {getAllExerciseHistory(selectedExerciseHistory).map((entry, idx) => {
+                    const exerciseType = entry.type || 'strength';
+
+                    return (
+                      <div key={idx} className="p-3 bg-gray-700 rounded-lg border border-gray-600">
+                        <div className="flex items-center justify-between mb-2">
+                          <span className="text-sm font-medium text-gray-100">
+                            {formatDate(entry.date)}
+                          </span>
+                          <span className={`text-xs px-2 py-0.5 rounded ${
+                            exerciseType === 'cardio'
+                              ? 'bg-blue-900/50 text-blue-400'
+                              : 'bg-emerald-900/50 text-emerald-400'
+                          }`}>
+                            {exerciseType}
+                          </span>
+                        </div>
+                        <div className="space-y-1">
+                          {entry.sets && entry.sets.map((set, setIdx) => (
+                            <div key={setIdx} className="text-sm text-gray-300">
+                              {exerciseType === 'cardio' ? (
+                                <>
+                                  Entry {setIdx + 1}: {set.distance ? `${set.distance} ${set.unit || 'mi'} in ${set.time}` : 'Not logged'}
+                                  {set.distance && set.time && (
+                                    <span className="text-cyan-400 ml-2">
+                                      ({calculatePace(parseTimeToSeconds(set.time), parseFloat(set.distance))}/{set.unit === 'km' ? 'km' : 'mi'})
+                                    </span>
+                                  )}
+                                </>
+                              ) : (
+                                <>Set {setIdx + 1}: {set.weight ? `${set.weight} lb × ${set.reps} reps` : 'Not logged'}</>
+                              )}
+                            </div>
+                          ))}
+                        </div>
+                        {entry.notes && (
+                          <p className="mt-2 text-xs text-gray-400 italic">
+                            Note: {entry.notes}
+                          </p>
+                        )}
                       </div>
-                      <div className="space-y-1">
-                        {entry.sets && entry.sets.map((set, setIdx) => (
-                          <div key={setIdx} className="text-sm text-gray-300">
-                            Set {setIdx + 1}: {set.weight ? `${set.weight} lb × ${set.reps} reps` : 'Not logged'}
-                          </div>
-                        ))}
-                      </div>
-                      {entry.notes && (
-                        <p className="mt-2 text-xs text-gray-400 italic">
-                          Note: {entry.notes}
-                        </p>
-                      )}
-                    </div>
-                  ))}
+                    );
+                  })}
                 </div>
               </div>
             )}
@@ -1484,10 +1831,13 @@ const WorkoutTracker = () => {
                         onClick={() => {
                           if (previousSession && previousSession.sets) {
                             const newExercises = [...exercises];
-                            newExercises[exIdx].sets = previousSession.sets.map(s => ({
-                              weight: s.weight || '',
-                              reps: s.reps || ''
-                            }));
+                            const prevType = previousSession.type || 'strength';
+                            newExercises[exIdx].type = prevType;
+                            newExercises[exIdx].sets = previousSession.sets.map(s =>
+                              prevType === 'cardio'
+                                ? { distance: s.distance || '', time: s.time || '', unit: s.unit || 'miles' }
+                                : { weight: s.weight || '', reps: s.reps || '' }
+                            );
                             setExercises(newExercises);
                           }
                         }}
@@ -1511,39 +1861,157 @@ const WorkoutTracker = () => {
                       </button>
                     </div>
 
+                    {/* Exercise Type Toggle */}
+                    <div className="flex items-center gap-2 mb-3">
+                      <span className="text-xs text-gray-400">Type:</span>
+                      <button
+                        onClick={() => {
+                          const newExercises = [...exercises];
+                          newExercises[exIdx].type = 'strength';
+                          // Convert sets to strength format
+                          newExercises[exIdx].sets = newExercises[exIdx].sets.map(() => ({
+                            weight: '',
+                            reps: ''
+                          }));
+                          setExercises(newExercises);
+                        }}
+                        className={`px-3 py-1 rounded text-xs font-medium transition-colors ${
+                          (exercise.type || 'strength') === 'strength'
+                            ? 'bg-emerald-600 text-white'
+                            : 'bg-gray-600 text-gray-300 hover:bg-gray-500'
+                        }`}
+                      >
+                        Strength
+                      </button>
+                      <button
+                        onClick={() => {
+                          const newExercises = [...exercises];
+                          newExercises[exIdx].type = 'cardio';
+                          // Convert sets to cardio format
+                          newExercises[exIdx].sets = newExercises[exIdx].sets.map(() => ({
+                            distance: '',
+                            time: '',
+                            unit: 'miles'
+                          }));
+                          setExercises(newExercises);
+                        }}
+                        className={`px-3 py-1 rounded text-xs font-medium transition-colors ${
+                          exercise.type === 'cardio'
+                            ? 'bg-blue-600 text-white'
+                            : 'bg-gray-600 text-gray-300 hover:bg-gray-500'
+                        }`}
+                      >
+                        Cardio
+                      </button>
+                    </div>
+
                     {/* Previous Session Banner */}
                     {previousSession && (
                       <div className="mb-3 p-3 bg-blue-950/30 border border-blue-900/50 rounded-lg">
                         <div className="flex items-center justify-between mb-2">
                           <span className="text-xs font-medium text-blue-400">Last Session ({formatDate(previousSession.date)})</span>
-                          <span className="text-xs text-gray-400">
-                            {previousSession.sets?.map(s => s.reps).filter(r => r).join(', ') || 'No data'} reps
+                          <span className={`text-xs px-2 py-0.5 rounded ${
+                            (previousSession.type || 'strength') === 'cardio'
+                              ? 'bg-blue-900/50 text-blue-400'
+                              : 'bg-emerald-900/50 text-emerald-400'
+                          }`}>
+                            {previousSession.type || 'strength'}
                           </span>
                         </div>
                         <div className="flex gap-2 flex-wrap">
                           {previousSession.sets?.map((prevSet, idx) => (
                             <span key={idx} className="text-xs text-gray-300 bg-gray-700/50 px-2 py-1 rounded">
-                              {prevSet.weight || '?'}lb × {prevSet.reps || '?'}
+                              {(previousSession.type || 'strength') === 'cardio'
+                                ? `${prevSet.distance || '?'} ${prevSet.unit || 'mi'} in ${prevSet.time || '?'}`
+                                : `${prevSet.weight || '?'}lb × ${prevSet.reps || '?'}`}
                             </span>
                           ))}
                         </div>
-                        <div className="text-xs text-gray-400 mt-2">
-                          Volume: {previousVolume.toLocaleString()} lb
-                        </div>
+                        {(previousSession.type || 'strength') !== 'cardio' && (
+                          <div className="text-xs text-gray-400 mt-2">
+                            Volume: {previousVolume.toLocaleString()} lb
+                          </div>
+                        )}
                       </div>
                     )}
 
                     <div className="space-y-2">
                       {exercise.sets.map((set, setIdx) => {
-                        const comparison = compareSetToPrevious(set, previousSession?.sets, setIdx);
+                        const exerciseType = exercise.type || 'strength';
+                        const comparison = exerciseType === 'strength' ? compareSetToPrevious(set, previousSession?.sets, setIdx) : null;
 
+                        if (exerciseType === 'cardio') {
+                          // Cardio input fields
+                          return (
+                            <div key={setIdx} className="flex gap-2 items-center flex-wrap">
+                              <span className="text-sm font-medium text-gray-400 w-16">Entry {setIdx + 1}</span>
+                              <input
+                                type="text"
+                                placeholder="Distance"
+                                value={set.distance || ''}
+                                onChange={(e) => {
+                                  const newExercises = [...exercises];
+                                  newExercises[exIdx].sets[setIdx].distance = e.target.value;
+                                  setExercises(newExercises);
+                                }}
+                                className="px-3 py-2 bg-gray-700 border border-gray-600 rounded-lg w-20 text-gray-100"
+                              />
+                              <select
+                                value={set.unit || 'miles'}
+                                onChange={(e) => {
+                                  const newExercises = [...exercises];
+                                  newExercises[exIdx].sets[setIdx].unit = e.target.value;
+                                  setExercises(newExercises);
+                                }}
+                                className="px-2 py-2 bg-gray-700 border border-gray-600 rounded-lg text-gray-100 text-sm"
+                              >
+                                <option value="miles">mi</option>
+                                <option value="km">km</option>
+                                <option value="meters">m</option>
+                              </select>
+                              <span className="text-gray-400">in</span>
+                              <input
+                                type="text"
+                                placeholder="MM:SS"
+                                value={set.time || ''}
+                                onChange={(e) => {
+                                  const newExercises = [...exercises];
+                                  newExercises[exIdx].sets[setIdx].time = e.target.value;
+                                  setExercises(newExercises);
+                                }}
+                                className="px-3 py-2 bg-gray-700 border border-gray-600 rounded-lg w-24 text-gray-100"
+                              />
+                              {/* Show calculated pace */}
+                              {set.distance && set.time && (
+                                <span className="text-xs text-cyan-400 bg-cyan-950/30 px-2 py-1 rounded">
+                                  {calculatePace(parseTimeToSeconds(set.time), parseFloat(set.distance))}/{set.unit === 'km' ? 'km' : 'mi'}
+                                </span>
+                              )}
+                              {exercise.sets.length > 1 && (
+                                <button
+                                  onClick={() => {
+                                    const newExercises = [...exercises];
+                                    newExercises[exIdx].sets = newExercises[exIdx].sets.filter((_, idx) => idx !== setIdx);
+                                    setExercises(newExercises);
+                                  }}
+                                  className="p-1 hover:bg-red-600/20 text-red-400 rounded transition-colors"
+                                  title="Remove entry"
+                                >
+                                  <X className="w-3 h-3" />
+                                </button>
+                              )}
+                            </div>
+                          );
+                        }
+
+                        // Strength input fields
                         return (
                           <div key={setIdx} className="flex gap-2 items-center flex-wrap">
                             <span className="text-sm font-medium text-gray-400 w-12">Set {setIdx + 1}</span>
                             <input
                               type="text"
                               placeholder="Weight"
-                              value={set.weight}
+                              value={set.weight || ''}
                               onChange={(e) => {
                                 const newExercises = [...exercises];
                                 newExercises[exIdx].sets[setIdx].weight = e.target.value;
@@ -1555,7 +2023,7 @@ const WorkoutTracker = () => {
                             <input
                               type="text"
                               placeholder="Reps"
-                              value={set.reps}
+                              value={set.reps || ''}
                               onChange={(e) => {
                                 const newExercises = [...exercises];
                                 newExercises[exIdx].sets[setIdx].reps = e.target.value;
@@ -1596,44 +2064,98 @@ const WorkoutTracker = () => {
                       <button
                         onClick={() => {
                           const newExercises = [...exercises];
+                          const exerciseType = exercise.type || 'strength';
                           const lastSet = exercise.sets[exercise.sets.length - 1];
-                          newExercises[exIdx].sets.push({
-                            weight: lastSet?.weight || '',
-                            reps: lastSet?.reps || ''
-                          });
+
+                          if (exerciseType === 'cardio') {
+                            newExercises[exIdx].sets.push({
+                              distance: '',
+                              time: '',
+                              unit: lastSet?.unit || 'miles'
+                            });
+                          } else {
+                            newExercises[exIdx].sets.push({
+                              weight: lastSet?.weight || '',
+                              reps: lastSet?.reps || ''
+                            });
+                          }
                           setExercises(newExercises);
                         }}
                         className="w-full py-2 px-3 bg-gray-700 hover:bg-gray-600 text-gray-300 text-sm rounded-lg transition-colors flex items-center justify-center gap-2"
                       >
                         <Plus className="w-4 h-4" />
-                        Add Set
+                        Add {(exercise.type || 'strength') === 'cardio' ? 'Entry' : 'Set'}
                       </button>
                     </div>
 
-                    {/* Current Volume Display */}
-                    {currentVolume > 0 && (
-                      <div className="mt-3 p-2 bg-gray-750 rounded border border-gray-600">
-                        <div className="flex items-center justify-between text-sm">
-                          <span className="text-gray-400">Current Volume:</span>
-                          <div className="flex items-center gap-2">
-                            <span className="text-gray-200 font-medium">
-                              {currentVolume.toLocaleString()} lb
-                            </span>
-                            {volumeChange !== null && (
-                              <span className={`text-xs font-medium ${
-                                parseFloat(volumeChange) > 0
-                                  ? 'text-emerald-400'
-                                  : parseFloat(volumeChange) < 0
-                                    ? 'text-red-400'
-                                    : 'text-gray-400'
-                              }`}>
-                                {parseFloat(volumeChange) > 0 ? '+' : ''}{volumeChange}%
-                              </span>
-                            )}
+                    {/* Summary Display - Conditional based on type */}
+                    {(() => {
+                      const exerciseType = exercise.type || 'strength';
+
+                      if (exerciseType === 'cardio') {
+                        const totalDistance = calculateTotalDistance(exercise.sets);
+                        const totalDuration = calculateTotalDuration(exercise.sets);
+                        const avgPace = totalDistance > 0 ? calculatePace(totalDuration, totalDistance) : null;
+
+                        if (totalDistance > 0 || totalDuration > 0) {
+                          return (
+                            <div className="mt-3 p-2 bg-gray-750 rounded border border-gray-600">
+                              <div className="grid grid-cols-3 gap-2 text-sm">
+                                <div>
+                                  <span className="text-gray-400">Total Distance:</span>
+                                  <span className="text-gray-200 font-medium ml-2">
+                                    {totalDistance.toFixed(2)} {exercise.sets[0]?.unit || 'mi'}
+                                  </span>
+                                </div>
+                                <div>
+                                  <span className="text-gray-400">Total Time:</span>
+                                  <span className="text-gray-200 font-medium ml-2">
+                                    {formatSecondsToTime(totalDuration)}
+                                  </span>
+                                </div>
+                                {avgPace && (
+                                  <div>
+                                    <span className="text-gray-400">Avg Pace:</span>
+                                    <span className="text-cyan-400 font-medium ml-2">
+                                      {avgPace}/{exercise.sets[0]?.unit === 'km' ? 'km' : 'mi'}
+                                    </span>
+                                  </div>
+                                )}
+                              </div>
+                            </div>
+                          );
+                        }
+                        return null;
+                      }
+
+                      // Strength volume display
+                      if (currentVolume > 0) {
+                        return (
+                          <div className="mt-3 p-2 bg-gray-750 rounded border border-gray-600">
+                            <div className="flex items-center justify-between text-sm">
+                              <span className="text-gray-400">Current Volume:</span>
+                              <div className="flex items-center gap-2">
+                                <span className="text-gray-200 font-medium">
+                                  {currentVolume.toLocaleString()} lb
+                                </span>
+                                {volumeChange !== null && (
+                                  <span className={`text-xs font-medium ${
+                                    parseFloat(volumeChange) > 0
+                                      ? 'text-emerald-400'
+                                      : parseFloat(volumeChange) < 0
+                                        ? 'text-red-400'
+                                        : 'text-gray-400'
+                                  }`}>
+                                    {parseFloat(volumeChange) > 0 ? '+' : ''}{volumeChange}%
+                                  </span>
+                                )}
+                              </div>
+                            </div>
                           </div>
-                        </div>
-                      </div>
-                    )}
+                        );
+                      }
+                      return null;
+                    })()}
 
                     <textarea
                       placeholder="Notes"
@@ -1674,11 +2196,12 @@ const WorkoutTracker = () => {
                 // Check for PRs in all exercises
                 const allPRs = [];
                 exercises.forEach(exercise => {
-                  const prs = checkForPRs(exercise.name, exercise.sets, logDate);
+                  const exerciseType = exercise.type || 'strength';
+                  const prs = checkForPRs(exercise.name, exercise.sets, logDate, exerciseType);
                   allPRs.push(...prs);
 
                   // Update PRs in state
-                  updatePRs(exercise.name, exercise.sets, logDate, logKey);
+                  updatePRs(exercise.name, exercise.sets, logDate, logKey, exerciseType);
                 });
 
                 // Save workout log
@@ -1835,6 +2358,33 @@ const WorkoutTracker = () => {
                         <p className="text-gray-400">
                           {pr.value} lb (from {pr.weight} lb × {pr.reps} reps)
                           {pr.previous > 0 && ` (previous: ${pr.previous} lb)`}
+                        </p>
+                      </>
+                    )}
+                    {pr.type === 'maxDistance' && (
+                      <>
+                        <p className="font-medium">Longest Distance!</p>
+                        <p className="text-gray-400">
+                          {pr.value} {pr.unit || 'miles'} in {pr.time}
+                          {pr.previous > 0 && ` (previous: ${pr.previous} ${pr.unit || 'miles'})`}
+                        </p>
+                      </>
+                    )}
+                    {pr.type === 'fastestPace' && (
+                      <>
+                        <p className="font-medium">Fastest Pace!</p>
+                        <p className="text-gray-400">
+                          {pr.displayValue}/{pr.unit === 'km' ? 'km' : 'mi'} for {pr.distance} {pr.unit === 'km' ? 'km' : 'mi'}
+                          {pr.previous !== Infinity && pr.previous > 0 && ` (previous: ${formatSecondsToTime(Math.round(pr.previous))}/${pr.unit === 'km' ? 'km' : 'mi'})`}
+                        </p>
+                      </>
+                    )}
+                    {pr.type === 'longestDuration' && (
+                      <>
+                        <p className="font-medium">Longest Duration!</p>
+                        <p className="text-gray-400">
+                          {pr.displayValue} for {pr.distance} {pr.unit === 'km' ? 'km' : 'mi'}
+                          {pr.previous > 0 && ` (previous: ${formatSecondsToTime(pr.previous)})`}
                         </p>
                       </>
                     )}
