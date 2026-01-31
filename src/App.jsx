@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { Plus, ChevronLeft, ChevronRight, TrendingUp, Calendar, Dumbbell, Save, X, History, Clock, Play, Pause, RotateCcw, Settings, Trash2, Edit3, Trophy } from 'lucide-react';
+import { Plus, ChevronLeft, ChevronRight, TrendingUp, Calendar, Dumbbell, Save, X, History, Settings, Trash2, Edit3, Trophy } from 'lucide-react';
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
 
 const WorkoutTracker = () => {
@@ -61,15 +61,6 @@ const WorkoutTracker = () => {
   const [storageError, setStorageError] = useState('');
   const [showExportImport, setShowExportImport] = useState(false);
 
-  // Rest Timer State
-  const [restTimer, setRestTimer] = useState(null);
-  const [timerSeconds, setTimerSeconds] = useState(0);
-  const [timerActive, setTimerActive] = useState(false);
-  const [preferences, setPreferences] = useState({
-    defaultRestSeconds: 120,
-    restTimerSound: true,
-    exerciseRestTimes: {}
-  });
 
   // Personal Records State
   const [personalRecords, setPersonalRecords] = useState({});
@@ -205,7 +196,6 @@ const WorkoutTracker = () => {
         const logs = localStorage.getItem('workout-logs');
         const metrics = localStorage.getItem('weekly-metrics');
         const savedBlocks = localStorage.getItem('workout-blocks');
-        const savedPrefs = localStorage.getItem('workout-preferences');
         const savedPRs = localStorage.getItem('personal-records');
 
         const parsedLogs = logs ? JSON.parse(logs) : {};
@@ -214,7 +204,6 @@ const WorkoutTracker = () => {
         setWorkoutLogs(parsedLogs);
         setWeeklyMetrics(parsedMetrics);
         if (savedBlocks) setBlocks(JSON.parse(savedBlocks));
-        if (savedPrefs) setPreferences(JSON.parse(savedPrefs));
 
         // Always recalculate PRs from historical data to ensure all exercises have PRs
         if (Object.keys(parsedLogs).length > 0) {
@@ -267,97 +256,12 @@ const WorkoutTracker = () => {
   React.useEffect(() => {
     if (dataLoaded) {
       try {
-        localStorage.setItem('workout-preferences', JSON.stringify(preferences));
-      } catch (error) {
-        console.error('Error saving preferences:', error);
-      }
-    }
-  }, [preferences, dataLoaded]);
-
-  React.useEffect(() => {
-    if (dataLoaded) {
-      try {
         localStorage.setItem('personal-records', JSON.stringify(personalRecords));
       } catch (error) {
         console.error('Error saving personal records:', error);
       }
     }
   }, [personalRecords, dataLoaded]);
-
-  // Rest Timer Logic
-  React.useEffect(() => {
-    let interval;
-    if (timerActive && timerSeconds > 0) {
-      interval = setInterval(() => {
-        setTimerSeconds(prev => {
-          if (prev <= 1) {
-            setTimerActive(false);
-            // Play notification sound and show browser notification
-            if (preferences.restTimerSound) {
-              try {
-                const audio = new Audio('data:audio/wav;base64,UklGRnoGAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQoGAACBhYqFbF1fdJivrJBhNjVgodDbq2EcBj+a2/LDciUFLIHO8tiJNwgZaLvt559NEAxQp+PwtmMcBjiR1/LMeSwFJHfH8N2QQAoUXrTp66hVFApGn+DyvmwhBTGH0fPTgjMGHm7A7+OZURE');
-                audio.play().catch(() => {});
-              } catch (e) {
-                console.log('Audio playback failed:', e);
-              }
-            }
-            // Request notification permission and show notification
-            if ('Notification' in window && Notification.permission === 'granted') {
-              new Notification('Rest Timer Complete!', {
-                body: 'Time to start your next set',
-                icon: '💪',
-                tag: 'rest-timer'
-              });
-            }
-            return 0;
-          }
-          return prev - 1;
-        });
-      }, 1000);
-    }
-    return () => clearInterval(interval);
-  }, [timerActive, timerSeconds, preferences.restTimerSound]);
-
-  const startRestTimer = (exerciseName) => {
-    const restTime = preferences.exerciseRestTimes[exerciseName] || preferences.defaultRestSeconds;
-    setTimerSeconds(restTime);
-    setTimerActive(true);
-    setRestTimer({ exerciseName, totalSeconds: restTime });
-
-    // Request notification permission if not already granted
-    if ('Notification' in window && Notification.permission === 'default') {
-      Notification.requestPermission();
-    }
-  };
-
-  const pauseRestTimer = () => {
-    setTimerActive(false);
-  };
-
-  const resumeRestTimer = () => {
-    if (timerSeconds > 0) {
-      setTimerActive(true);
-    }
-  };
-
-  const resetRestTimer = () => {
-    if (restTimer) {
-      setTimerSeconds(restTimer.totalSeconds);
-      setTimerActive(true);
-    }
-  };
-
-  const stopRestTimer = () => {
-    setTimerActive(false);
-    setTimerSeconds(0);
-    setRestTimer(null);
-  };
-
-  const formatTime = (seconds) => {
-    const mins = Math.floor(seconds / 60);
-    const secs = seconds % 60;
-    return `${mins}:${secs.toString().padStart(2, '0')}`;
-  };
 
   // Cardio Utility Functions
   const parseTimeToSeconds = (timeStr) => {
@@ -465,6 +369,42 @@ const WorkoutTracker = () => {
           });
         }
       });
+
+      return prsDetected;
+    }
+
+    if (exerciseType === 'tabata') {
+      // Tabata PR checks
+      sets.forEach(set => {
+        const rounds = parseInt(set.rounds);
+
+        if (!rounds) return;
+
+        // Check most rounds in a single set PR
+        if (!currentPRs.mostRounds || rounds > currentPRs.mostRounds.value) {
+          prsDetected.push({
+            type: 'mostRounds',
+            exerciseName,
+            value: rounds,
+            workSeconds: set.workSeconds || 20,
+            restSeconds: set.restSeconds || 10,
+            previous: currentPRs.mostRounds?.value || 0,
+            date: logDate
+          });
+        }
+      });
+
+      // Check most sets in a session PR
+      const completedSets = sets.filter(s => parseInt(s.rounds) > 0).length;
+      if (completedSets > 0 && (!currentPRs.mostSets || completedSets > currentPRs.mostSets.value)) {
+        prsDetected.push({
+          type: 'mostSets',
+          exerciseName,
+          value: completedSets,
+          previous: currentPRs.mostSets?.value || 0,
+          date: logDate
+        });
+      }
 
       return prsDetected;
     }
@@ -583,6 +523,34 @@ const WorkoutTracker = () => {
           };
         }
       });
+    } else if (exerciseType === 'tabata') {
+      // Tabata PR updates
+      sets.forEach(set => {
+        const rounds = parseInt(set.rounds);
+
+        if (!rounds) return;
+
+        // Update most rounds
+        if (!updatedPRs.mostRounds || rounds > updatedPRs.mostRounds.value) {
+          updatedPRs.mostRounds = {
+            value: rounds,
+            workSeconds: set.workSeconds || 20,
+            restSeconds: set.restSeconds || 10,
+            date: logDate,
+            logKey
+          };
+        }
+      });
+
+      // Update most sets
+      const completedSets = sets.filter(s => parseInt(s.rounds) > 0).length;
+      if (completedSets > 0 && (!updatedPRs.mostSets || completedSets > updatedPRs.mostSets.value)) {
+        updatedPRs.mostSets = {
+          value: completedSets,
+          date: logDate,
+          logKey
+        };
+      }
     } else {
       sets.forEach(set => {
         const weight = parseFloat(set.weight);
@@ -650,6 +618,15 @@ const WorkoutTracker = () => {
           } else if (type === 'duration') {
             // Total duration in session (in minutes for display)
             value = calculateTotalDuration(entry.sets) / 60;
+          }
+        } else if (exerciseType === 'tabata') {
+          // Tabata chart types
+          if (type === 'rounds') {
+            // Total rounds in session
+            value = entry.sets.reduce((sum, s) => sum + (parseInt(s.rounds) || 0), 0);
+          } else if (type === 'sets') {
+            // Number of sets completed
+            value = entry.sets.filter(s => parseInt(s.rounds) > 0).length;
           }
         } else {
           // Strength chart types
@@ -815,12 +792,13 @@ const WorkoutTracker = () => {
             <button
               onClick={exportData}
               className="w-full px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg flex items-center justify-center gap-2"
+              title="Download all data as a backup file"
             >
               <Save className="w-4 h-4" />
               Export Data (Download Backup)
             </button>
             <div>
-              <label className="block w-full px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-center cursor-pointer">
+              <label className="block w-full px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-center cursor-pointer" title="Restore from a backup file">
                 <input
                   type="file"
                   accept=".json"
@@ -903,14 +881,14 @@ const WorkoutTracker = () => {
 
                   return (
                     <>
-                      <div className="p-4 bg-cyan-950/30 border border-cyan-900/50 rounded-lg">
+                      <div className="p-4 bg-cyan-950/30 border border-cyan-900/50 rounded-lg" title="Heart Rate Variability - higher is generally better for recovery">
                         <p className="text-sm text-gray-400">Latest HRV</p>
                         <p className="text-3xl font-bold text-cyan-400">
                           {latestHrv ? `${latestHrv}` : '—'}
                         </p>
                         <p className="text-xs text-gray-500">ms</p>
                       </div>
-                      <div className="p-4 bg-purple-950/30 border border-purple-900/50 rounded-lg">
+                      <div className="p-4 bg-purple-950/30 border border-purple-900/50 rounded-lg" title="7-day rolling average HRV">
                         <p className="text-sm text-gray-400">Avg HRV (7d)</p>
                         <p className="text-3xl font-bold text-purple-400">
                           {avgHrv ? `${avgHrv}` : '—'}
@@ -1141,6 +1119,33 @@ const WorkoutTracker = () => {
                     );
                   }
 
+                  if (exerciseType === 'tabata') {
+                    return (
+                      <div className="flex gap-2 mb-4">
+                        <button
+                          onClick={() => setChartType('rounds')}
+                          className={`px-3 py-1 rounded text-sm transition-colors ${
+                            chartType === 'rounds'
+                              ? 'bg-orange-600 text-white'
+                              : 'bg-gray-700 text-gray-300 hover:bg-gray-600'
+                          }`}
+                        >
+                          Rounds
+                        </button>
+                        <button
+                          onClick={() => setChartType('sets')}
+                          className={`px-3 py-1 rounded text-sm transition-colors ${
+                            chartType === 'sets'
+                              ? 'bg-orange-600 text-white'
+                              : 'bg-gray-700 text-gray-300 hover:bg-gray-600'
+                          }`}
+                        >
+                          Sets
+                        </button>
+                      </div>
+                    );
+                  }
+
                   return (
                     <div className="flex gap-2 mb-4">
                       <button
@@ -1255,11 +1260,34 @@ const WorkoutTracker = () => {
                       )}
                       {personalRecords[selectedExerciseHistory].estimated1RM && (
                         <div className="bg-gray-800/60 rounded-lg p-3 border border-gray-700">
-                          <div className="text-xs text-gray-400 mb-1">Est. 1RM</div>
+                          <div className="text-xs text-gray-400 mb-1" title="Estimated one-rep max using Epley formula">Est. 1RM</div>
                           <div className="text-lg font-bold text-purple-400">
                             {personalRecords[selectedExerciseHistory].estimated1RM.value} lb
                           </div>
                           <div className="text-xs text-gray-500">Epley formula</div>
+                        </div>
+                      )}
+                      {/* Tabata PRs */}
+                      {personalRecords[selectedExerciseHistory].mostRounds && (
+                        <div className="bg-gray-800/60 rounded-lg p-3 border border-gray-700">
+                          <div className="text-xs text-gray-400 mb-1">Most Rounds</div>
+                          <div className="text-lg font-bold text-orange-400">
+                            {personalRecords[selectedExerciseHistory].mostRounds.value} rounds
+                          </div>
+                          <div className="text-xs text-gray-500">
+                            {personalRecords[selectedExerciseHistory].mostRounds.date}
+                          </div>
+                        </div>
+                      )}
+                      {personalRecords[selectedExerciseHistory].mostSets && (
+                        <div className="bg-gray-800/60 rounded-lg p-3 border border-gray-700">
+                          <div className="text-xs text-gray-400 mb-1">Most Sets</div>
+                          <div className="text-lg font-bold text-orange-400">
+                            {personalRecords[selectedExerciseHistory].mostSets.value} sets
+                          </div>
+                          <div className="text-xs text-gray-500">
+                            {personalRecords[selectedExerciseHistory].mostSets.date}
+                          </div>
                         </div>
                       )}
                     </div>
@@ -1312,6 +1340,10 @@ const WorkoutTracker = () => {
                                 return [`${formatSecondsToTime(Math.round(value))}/mi`, 'Pace'];
                               } else if (chartType === 'duration') {
                                 return [`${value.toFixed(0)} min`, 'Duration'];
+                              } else if (chartType === 'rounds') {
+                                return [`${value}`, 'Total Rounds'];
+                              } else if (chartType === 'sets') {
+                                return [`${value}`, 'Sets Completed'];
                               }
                               return [value, 'Value'];
                             }}
@@ -1343,7 +1375,9 @@ const WorkoutTracker = () => {
                           <span className={`text-xs px-2 py-0.5 rounded ${
                             exerciseType === 'cardio'
                               ? 'bg-blue-900/50 text-blue-400'
-                              : 'bg-emerald-900/50 text-emerald-400'
+                              : exerciseType === 'tabata'
+                                ? 'bg-orange-900/50 text-orange-400'
+                                : 'bg-emerald-900/50 text-emerald-400'
                           }`}>
                             {exerciseType}
                           </span>
@@ -1359,6 +1393,10 @@ const WorkoutTracker = () => {
                                       ({calculatePace(parseTimeToSeconds(set.time), parseFloat(set.distance))}/{set.unit === 'km' ? 'km' : 'mi'})
                                     </span>
                                   )}
+                                </>
+                              ) : exerciseType === 'tabata' ? (
+                                <>
+                                  Set {setIdx + 1}: {set.rounds ? `${set.rounds} rounds @ ${set.workSeconds || '20'}s/${set.restSeconds || '10'}s` : 'Not logged'}
                                 </>
                               ) : (
                                 <>Set {setIdx + 1}: {set.weight ? `${set.weight} lb × ${set.reps} reps` : 'Not logged'}</>
@@ -1793,13 +1831,14 @@ const WorkoutTracker = () => {
                   />
                 </div>
                 <div>
-                  <label className="text-xs text-gray-400 block mb-2">Overnight HRV (ms)</label>
+                  <label className="text-xs text-gray-400 block mb-2" title="Heart Rate Variability - lower when fatigued">Overnight HRV (ms)</label>
                   <input
                     type="text"
                     value={logHrv}
                     onChange={(e) => setLogHrv(e.target.value)}
                     placeholder="e.g., 65"
                     className="px-3 py-2 bg-gray-700 border border-gray-600 rounded-lg text-gray-100 w-full"
+                    title="Heart Rate Variability - lower when fatigued"
                   />
                 </div>
               </div>
@@ -1843,7 +1882,7 @@ const WorkoutTracker = () => {
                         }}
                         disabled={!previousSession}
                         className="px-3 py-2 bg-blue-600 hover:bg-blue-700 disabled:bg-gray-600 disabled:cursor-not-allowed text-white text-xs rounded-lg transition-colors whitespace-nowrap"
-                        title="Copy last session"
+                        title="Load your previous workout data"
                       >
                         Copy Last
                       </button>
@@ -1880,6 +1919,7 @@ const WorkoutTracker = () => {
                             ? 'bg-emerald-600 text-white'
                             : 'bg-gray-600 text-gray-300 hover:bg-gray-500'
                         }`}
+                        title="Track weight and reps"
                       >
                         Strength
                       </button>
@@ -1900,8 +1940,30 @@ const WorkoutTracker = () => {
                             ? 'bg-blue-600 text-white'
                             : 'bg-gray-600 text-gray-300 hover:bg-gray-500'
                         }`}
+                        title="Track distance and time"
                       >
                         Cardio
+                      </button>
+                      <button
+                        onClick={() => {
+                          const newExercises = [...exercises];
+                          newExercises[exIdx].type = 'tabata';
+                          // Convert sets to tabata format
+                          newExercises[exIdx].sets = newExercises[exIdx].sets.map(() => ({
+                            rounds: '',
+                            workSeconds: '20',
+                            restSeconds: '10'
+                          }));
+                          setExercises(newExercises);
+                        }}
+                        className={`px-3 py-1 rounded text-xs font-medium transition-colors ${
+                          exercise.type === 'tabata'
+                            ? 'bg-orange-600 text-white'
+                            : 'bg-gray-600 text-gray-300 hover:bg-gray-500'
+                        }`}
+                        title="Track interval rounds"
+                      >
+                        Tabata
                       </button>
                     </div>
 
@@ -1913,7 +1975,9 @@ const WorkoutTracker = () => {
                           <span className={`text-xs px-2 py-0.5 rounded ${
                             (previousSession.type || 'strength') === 'cardio'
                               ? 'bg-blue-900/50 text-blue-400'
-                              : 'bg-emerald-900/50 text-emerald-400'
+                              : (previousSession.type || 'strength') === 'tabata'
+                                ? 'bg-orange-900/50 text-orange-400'
+                                : 'bg-emerald-900/50 text-emerald-400'
                           }`}>
                             {previousSession.type || 'strength'}
                           </span>
@@ -1923,12 +1987,14 @@ const WorkoutTracker = () => {
                             <span key={idx} className="text-xs text-gray-300 bg-gray-700/50 px-2 py-1 rounded">
                               {(previousSession.type || 'strength') === 'cardio'
                                 ? `${prevSet.distance || '?'} ${prevSet.unit || 'mi'} in ${prevSet.time || '?'}`
-                                : `${prevSet.weight || '?'}lb × ${prevSet.reps || '?'}`}
+                                : (previousSession.type || 'strength') === 'tabata'
+                                  ? `${prevSet.rounds || '?'} rounds @ ${prevSet.workSeconds || '20'}s/${prevSet.restSeconds || '10'}s`
+                                  : `${prevSet.weight || '?'}lb × ${prevSet.reps || '?'}`}
                             </span>
                           ))}
                         </div>
-                        {(previousSession.type || 'strength') !== 'cardio' && (
-                          <div className="text-xs text-gray-400 mt-2">
+                        {(previousSession.type || 'strength') === 'strength' && (
+                          <div className="text-xs text-gray-400 mt-2" title="Total weight × reps for this exercise">
                             Volume: {previousVolume.toLocaleString()} lb
                           </div>
                         )}
@@ -2004,6 +2070,73 @@ const WorkoutTracker = () => {
                           );
                         }
 
+                        if (exerciseType === 'tabata') {
+                          // Tabata input fields
+                          return (
+                            <div key={setIdx} className="flex gap-2 items-center flex-wrap">
+                              <span className="text-sm font-medium text-gray-400 w-12">Set {setIdx + 1}</span>
+                              <input
+                                type="text"
+                                placeholder="Rounds"
+                                value={set.rounds || ''}
+                                onChange={(e) => {
+                                  const newExercises = [...exercises];
+                                  newExercises[exIdx].sets[setIdx].rounds = e.target.value;
+                                  setExercises(newExercises);
+                                }}
+                                className="px-3 py-2 bg-gray-700 border border-gray-600 rounded-lg w-20 text-gray-100"
+                                title="Number of rounds completed"
+                              />
+                              <span className="text-gray-400">rounds @</span>
+                              <input
+                                type="text"
+                                placeholder="20"
+                                value={set.workSeconds || '20'}
+                                onChange={(e) => {
+                                  const newExercises = [...exercises];
+                                  newExercises[exIdx].sets[setIdx].workSeconds = e.target.value;
+                                  setExercises(newExercises);
+                                }}
+                                className="px-2 py-2 bg-gray-700 border border-gray-600 rounded-lg w-14 text-gray-100 text-center"
+                                title="Work interval in seconds"
+                              />
+                              <span className="text-gray-400">s /</span>
+                              <input
+                                type="text"
+                                placeholder="10"
+                                value={set.restSeconds || '10'}
+                                onChange={(e) => {
+                                  const newExercises = [...exercises];
+                                  newExercises[exIdx].sets[setIdx].restSeconds = e.target.value;
+                                  setExercises(newExercises);
+                                }}
+                                className="px-2 py-2 bg-gray-700 border border-gray-600 rounded-lg w-14 text-gray-100 text-center"
+                                title="Rest interval in seconds"
+                              />
+                              <span className="text-gray-400">s</span>
+                              {/* Show total time */}
+                              {set.rounds && (
+                                <span className="text-xs text-orange-400 bg-orange-950/30 px-2 py-1 rounded" title="Total workout time">
+                                  {Math.floor((parseInt(set.rounds) * (parseInt(set.workSeconds || 20) + parseInt(set.restSeconds || 10)) - parseInt(set.restSeconds || 10)) / 60)}:{((parseInt(set.rounds) * (parseInt(set.workSeconds || 20) + parseInt(set.restSeconds || 10)) - parseInt(set.restSeconds || 10)) % 60).toString().padStart(2, '0')} total
+                                </span>
+                              )}
+                              {exercise.sets.length > 1 && (
+                                <button
+                                  onClick={() => {
+                                    const newExercises = [...exercises];
+                                    newExercises[exIdx].sets = newExercises[exIdx].sets.filter((_, idx) => idx !== setIdx);
+                                    setExercises(newExercises);
+                                  }}
+                                  className="p-1 hover:bg-red-600/20 text-red-400 rounded transition-colors"
+                                  title="Remove set"
+                                >
+                                  <X className="w-3 h-3" />
+                                </button>
+                              )}
+                            </div>
+                          );
+                        }
+
                         // Strength input fields
                         return (
                           <div key={setIdx} className="flex gap-2 items-center flex-wrap">
@@ -2032,19 +2165,11 @@ const WorkoutTracker = () => {
                               className="px-3 py-2 bg-gray-700 border border-gray-600 rounded-lg w-20 text-gray-100"
                             />
                             {comparison === 'improved' && (
-                              <span className="text-emerald-400 text-sm" title="Improvement!">↑</span>
+                              <span className="text-emerald-400 text-sm" title="Improvement over previous session">↑</span>
                             )}
                             {comparison === 'matched' && (
-                              <span className="text-blue-400 text-sm" title="Matched previous">✓</span>
+                              <span className="text-blue-400 text-sm" title="Matched previous session">✓</span>
                             )}
-                            <button
-                              onClick={() => startRestTimer(exercise.name)}
-                              className="px-2 py-1 bg-blue-600 hover:bg-blue-700 text-white text-xs rounded flex items-center gap-1 transition-colors"
-                              title="Start rest timer"
-                            >
-                              <Clock className="w-3 h-3" />
-                              Rest
-                            </button>
                             {exercise.sets.length > 1 && (
                               <button
                                 onClick={() => {
@@ -2072,6 +2197,12 @@ const WorkoutTracker = () => {
                               distance: '',
                               time: '',
                               unit: lastSet?.unit || 'miles'
+                            });
+                          } else if (exerciseType === 'tabata') {
+                            newExercises[exIdx].sets.push({
+                              rounds: '',
+                              workSeconds: lastSet?.workSeconds || '20',
+                              restSeconds: lastSet?.restSeconds || '10'
                             });
                           } else {
                             newExercises[exIdx].sets.push({
@@ -2128,12 +2259,32 @@ const WorkoutTracker = () => {
                         return null;
                       }
 
+                      if (exerciseType === 'tabata') {
+                        // Tabata summary
+                        const totalRounds = exercise.sets.reduce((sum, s) => sum + (parseInt(s.rounds) || 0), 0);
+                        const totalSets = exercise.sets.filter(s => parseInt(s.rounds) > 0).length;
+
+                        if (totalRounds > 0) {
+                          return (
+                            <div className="mt-3 p-2 bg-gray-750 rounded border border-gray-600">
+                              <div className="flex items-center justify-between text-sm">
+                                <span className="text-gray-400">Total:</span>
+                                <span className="text-orange-400 font-medium">
+                                  {totalRounds} rounds across {totalSets} set{totalSets !== 1 ? 's' : ''}
+                                </span>
+                              </div>
+                            </div>
+                          );
+                        }
+                        return null;
+                      }
+
                       // Strength volume display
                       if (currentVolume > 0) {
                         return (
                           <div className="mt-3 p-2 bg-gray-750 rounded border border-gray-600">
                             <div className="flex items-center justify-between text-sm">
-                              <span className="text-gray-400">Current Volume:</span>
+                              <span className="text-gray-400" title="Total weight × reps for this exercise">Current Volume:</span>
                               <div className="flex items-center gap-2">
                                 <span className="text-gray-200 font-medium">
                                   {currentVolume.toLocaleString()} lb
@@ -2232,80 +2383,6 @@ const WorkoutTracker = () => {
         )}
       </div>
 
-      {/* Rest Timer Modal */}
-      {restTimer && timerActive && (
-        <div className="fixed inset-0 bg-black/80 flex items-center justify-center z-50 p-6">
-          <div className="bg-gray-800 rounded-lg border border-gray-700 p-8 max-w-md w-full text-center">
-            <h3 className="text-xl font-semibold text-gray-100 mb-2">
-              {restTimer.exerciseName}
-            </h3>
-            <p className="text-sm text-gray-400 mb-6">Rest Period</p>
-
-            <div className="mb-8">
-              <div className="text-6xl font-bold text-emerald-400 mb-4">
-                {formatTime(timerSeconds)}
-              </div>
-              <div className="w-full bg-gray-700 rounded-full h-2 overflow-hidden">
-                <div
-                  className="bg-emerald-500 h-full transition-all duration-1000 ease-linear"
-                  style={{ width: `${(timerSeconds / restTimer.totalSeconds) * 100}%` }}
-                />
-              </div>
-            </div>
-
-            <div className="flex gap-3 justify-center mb-4">
-              <button
-                onClick={pauseRestTimer}
-                className="px-6 py-3 bg-gray-700 hover:bg-gray-600 text-gray-200 rounded-lg flex items-center gap-2 transition-colors"
-              >
-                <Pause className="w-5 h-5" />
-                Pause
-              </button>
-              <button
-                onClick={resetRestTimer}
-                className="px-6 py-3 bg-gray-700 hover:bg-gray-600 text-gray-200 rounded-lg flex items-center gap-2 transition-colors"
-              >
-                <RotateCcw className="w-5 h-5" />
-                Reset
-              </button>
-            </div>
-
-            <button
-              onClick={stopRestTimer}
-              className="text-sm text-gray-400 hover:text-gray-200 transition-colors"
-            >
-              Skip Rest
-            </button>
-          </div>
-        </div>
-      )}
-
-      {/* Paused Timer Indicator */}
-      {restTimer && !timerActive && timerSeconds > 0 && (
-        <div className="fixed bottom-6 right-6 bg-gray-800 border border-gray-700 rounded-lg p-4 shadow-lg z-40">
-          <div className="flex items-center gap-3">
-            <Clock className="w-5 h-5 text-gray-400" />
-            <div>
-              <p className="text-sm font-medium text-gray-200">Timer Paused</p>
-              <p className="text-xs text-gray-400">{formatTime(timerSeconds)} remaining</p>
-            </div>
-            <button
-              onClick={resumeRestTimer}
-              className="px-3 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded flex items-center gap-1 transition-colors"
-            >
-              <Play className="w-4 h-4" />
-              Resume
-            </button>
-            <button
-              onClick={stopRestTimer}
-              className="p-2 hover:bg-gray-700 text-gray-400 rounded transition-colors"
-            >
-              <X className="w-4 h-4" />
-            </button>
-          </div>
-        </div>
-      )}
-
       {/* Personal Records Modal */}
       {showPRModal && newPRs.length > 0 && (
         <div className="fixed inset-0 bg-black/80 flex items-center justify-center z-50 p-6">
@@ -2385,6 +2462,24 @@ const WorkoutTracker = () => {
                         <p className="text-gray-400">
                           {pr.displayValue} for {pr.distance} {pr.unit === 'km' ? 'km' : 'mi'}
                           {pr.previous > 0 && ` (previous: ${formatSecondsToTime(pr.previous)})`}
+                        </p>
+                      </>
+                    )}
+                    {pr.type === 'mostRounds' && (
+                      <>
+                        <p className="font-medium">Most Rounds!</p>
+                        <p className="text-gray-400">
+                          {pr.value} rounds @ {pr.workSeconds}s/{pr.restSeconds}s
+                          {pr.previous > 0 && ` (previous: ${pr.previous} rounds)`}
+                        </p>
+                      </>
+                    )}
+                    {pr.type === 'mostSets' && (
+                      <>
+                        <p className="font-medium">Most Tabata Sets!</p>
+                        <p className="text-gray-400">
+                          {pr.value} sets in one session
+                          {pr.previous > 0 && ` (previous: ${pr.previous} sets)`}
                         </p>
                       </>
                     )}
