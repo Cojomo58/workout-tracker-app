@@ -1,6 +1,7 @@
-import React, { useState } from 'react';
+import React, { useState, useMemo } from 'react';
 import { Plus, ChevronLeft, ChevronRight, TrendingUp, Calendar, Dumbbell, Save, X, History, Settings, Trash2, Edit3, Trophy } from 'lucide-react';
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
+import Fuse from 'fuse.js';
 
 const WorkoutTracker = () => {
   const [view, setView] = useState('calendar');
@@ -69,6 +70,10 @@ const WorkoutTracker = () => {
 
   // Charts State
   const [chartType, setChartType] = useState('weight');
+
+  // Autocomplete State
+  const [exerciseSuggestions, setExerciseSuggestions] = useState([]);
+  const [activeSuggestionIndex, setActiveSuggestionIndex] = useState(-1);
 
   // Migrate PRs from historical workout data
   const migrateHistoricalPRs = (logs) => {
@@ -656,7 +661,9 @@ const WorkoutTracker = () => {
       workoutLogs,
       weeklyMetrics,
       blocks,
-      exportDate: new Date().toISOString()
+      personalRecords,
+      exportDate: new Date().toISOString(),
+      version: '1.4'
     };
     
     const jsonString = JSON.stringify(data, null, 2);
@@ -691,6 +698,13 @@ const WorkoutTracker = () => {
         if (data.workoutLogs) setWorkoutLogs(data.workoutLogs);
         if (data.weeklyMetrics) setWeeklyMetrics(data.weeklyMetrics);
         if (data.blocks) setBlocks(data.blocks);
+        if (data.personalRecords) {
+          setPersonalRecords(data.personalRecords);
+        } else if (data.workoutLogs) {
+          // Backward compatibility: recalculate PRs for old exports
+          const migratedPRs = migrateHistoricalPRs(data.workoutLogs);
+          setPersonalRecords(migratedPRs);
+        }
         alert('Data imported successfully!');
         setShowExportImport(false);
       } catch (error) {
@@ -735,6 +749,38 @@ const WorkoutTracker = () => {
     return history.sort((a, b) => new Date(b.date) - new Date(a.date));
   };
 
+  // Get all unique exercise names for fuzzy search (deduplicated by case)
+  const getAllExerciseNames = useMemo(() => {
+    const nameMap = new Map(); // lowercase -> { name, count }
+    Object.values(workoutLogs).forEach(log => {
+      if (log.exercises) {
+        log.exercises.forEach(ex => {
+          if (ex.name) {
+            const key = ex.name.toLowerCase().trim();
+            const existing = nameMap.get(key);
+            if (existing) {
+              existing.count++;
+              // Keep the version that's used more often
+            } else {
+              nameMap.set(key, { name: ex.name.trim(), count: 1 });
+            }
+          }
+        });
+      }
+    });
+    return Array.from(nameMap.values()).map(v => v.name);
+  }, [workoutLogs]);
+
+  // Fuse instance for fuzzy search
+  const fuse = useMemo(() => {
+    return new Fuse(getAllExerciseNames, {
+      threshold: 0.4,
+      distance: 100,
+      minMatchCharLength: 2,
+      includeScore: true
+    });
+  }, [getAllExerciseNames]);
+
   const calculateVolume = (sets) => {
     if (!sets || !Array.isArray(sets)) return 0;
     return sets.reduce((total, set) => {
@@ -770,9 +816,9 @@ const WorkoutTracker = () => {
   };
 
   return (
-    <div className="max-w-4xl mx-auto p-6 bg-gray-900 min-h-screen">
+    <div className="max-w-4xl mx-auto p-4 md:p-6 bg-gray-900 min-h-screen">
       <div className="mb-6">
-        <h1 className="text-3xl font-bold text-gray-100 mb-2">Workout Tracker</h1>
+        <h1 className="text-2xl md:text-3xl font-bold text-gray-100 mb-2">Workout Tracker</h1>
         <div className="flex items-center justify-between">
           <p className="text-gray-400">Periodized training with progression tracking</p>
           <button
@@ -815,59 +861,59 @@ const WorkoutTracker = () => {
         )}
       </div>
 
-      <div className="flex gap-2 mb-6 border-b border-gray-700">
+      <div className="flex gap-1 md:gap-2 mb-6 border-b border-gray-700">
         <button
           onClick={() => setView('calendar')}
-          className={`px-4 py-3 font-medium transition-colors ${
+          className={`px-3 py-2 md:px-4 md:py-3 text-sm md:text-base font-medium transition-colors ${
             view === 'calendar'
               ? 'text-emerald-400 border-b-2 border-emerald-400'
               : 'text-gray-400 hover:text-gray-200'
           }`}
         >
-          <Calendar className="w-4 h-4 inline mr-2" />
+          <Calendar className="w-4 h-4 inline mr-1 md:mr-2" />
           Calendar
         </button>
         <button
           onClick={() => setView('progress')}
-          className={`px-4 py-3 font-medium transition-colors ${
+          className={`px-3 py-2 md:px-4 md:py-3 text-sm md:text-base font-medium transition-colors ${
             view === 'progress'
               ? 'text-emerald-400 border-b-2 border-emerald-400'
               : 'text-gray-400 hover:text-gray-200'
           }`}
         >
-          <TrendingUp className="w-4 h-4 inline mr-2" />
+          <TrendingUp className="w-4 h-4 inline mr-1 md:mr-2" />
           Progress
         </button>
         <button
           onClick={() => setView('template')}
-          className={`px-4 py-3 font-medium transition-colors ${
+          className={`px-3 py-2 md:px-4 md:py-3 text-sm md:text-base font-medium transition-colors ${
             view === 'template'
               ? 'text-emerald-400 border-b-2 border-emerald-400'
               : 'text-gray-400 hover:text-gray-200'
           }`}
         >
-          <Settings className="w-4 h-4 inline mr-2" />
-          Edit Template
+          <Settings className="w-4 h-4 inline mr-1 md:mr-2" />
+          Template
         </button>
       </div>
 
-      <div className="bg-gray-800 rounded-lg shadow-xl p-6 border border-gray-700">
+      <div className="bg-gray-800 rounded-lg shadow-xl p-4 md:p-6 border border-gray-700">
         {/* Progress View - showing condensed version */}
         {view === 'progress' && (
           <div className="space-y-6">
             <h2 className="text-2xl font-bold text-gray-100">Progress Tracker</h2>
             
-            <div className="bg-gray-800 p-6 rounded-lg border border-gray-700">
-              <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+            <div className="bg-gray-800 p-4 md:p-6 rounded-lg border border-gray-700">
+              <div className="grid grid-cols-2 md:grid-cols-4 gap-3 md:gap-4">
                 <div className="p-4 bg-emerald-950/30 border border-emerald-900/50 rounded-lg">
                   <p className="text-sm text-gray-400">Workouts Completed</p>
-                  <p className="text-3xl font-bold text-emerald-400">
+                  <p className="text-2xl md:text-3xl font-bold text-emerald-400">
                     {Object.keys(workoutLogs).filter(k => k.startsWith(`block${currentBlock}`)).length}
                   </p>
                 </div>
                 <div className="p-4 bg-blue-950/30 border border-blue-900/50 rounded-lg">
                   <p className="text-sm text-gray-400">Current Week</p>
-                  <p className="text-3xl font-bold text-blue-400">{currentWeek}</p>
+                  <p className="text-2xl md:text-3xl font-bold text-blue-400">{currentWeek}</p>
                 </div>
                 {(() => {
                   const hrvValues = Object.values(workoutLogs)
@@ -883,14 +929,14 @@ const WorkoutTracker = () => {
                     <>
                       <div className="p-4 bg-cyan-950/30 border border-cyan-900/50 rounded-lg" title="Heart Rate Variability - higher is generally better for recovery">
                         <p className="text-sm text-gray-400">Latest HRV</p>
-                        <p className="text-3xl font-bold text-cyan-400">
+                        <p className="text-2xl md:text-3xl font-bold text-cyan-400">
                           {latestHrv ? `${latestHrv}` : '—'}
                         </p>
                         <p className="text-xs text-gray-500">ms</p>
                       </div>
                       <div className="p-4 bg-purple-950/30 border border-purple-900/50 rounded-lg" title="7-day rolling average HRV">
                         <p className="text-sm text-gray-400">Avg HRV (7d)</p>
-                        <p className="text-3xl font-bold text-purple-400">
+                        <p className="text-2xl md:text-3xl font-bold text-purple-400">
                           {avgHrv ? `${avgHrv}` : '—'}
                         </p>
                         <p className="text-xs text-gray-500">ms</p>
@@ -1396,7 +1442,7 @@ const WorkoutTracker = () => {
                                 </>
                               ) : exerciseType === 'tabata' ? (
                                 <>
-                                  Set {setIdx + 1}: {set.rounds ? `${set.rounds} rounds @ ${set.workSeconds || '20'}s/${set.restSeconds || '10'}s` : 'Not logged'}
+                                  Set {setIdx + 1}: {set.rounds ? `${set.rounds} rounds @ ${set.workSeconds || '20'}s/${set.restSeconds || '10'}s${set.calories ? ` • ${set.calories} kcal` : ''}` : 'Not logged'}
                                 </>
                               ) : (
                                 <>Set {setIdx + 1}: {set.weight ? `${set.weight} lb × ${set.reps} reps` : 'Not logged'}</>
@@ -1856,16 +1902,74 @@ const WorkoutTracker = () => {
                 return (
                   <div key={exIdx} className="bg-gray-800 p-4 rounded-lg border border-gray-700">
                     <div className="mb-3 flex items-center gap-2">
-                      <input
-                        type="text"
-                        value={exercise.name}
-                        onChange={(e) => {
-                          const newExercises = [...exercises];
-                          newExercises[exIdx].name = e.target.value;
-                          setExercises(newExercises);
-                        }}
-                        className="flex-1 px-3 py-2 bg-gray-700 border border-gray-600 rounded-lg font-semibold text-gray-100"
-                      />
+                      <div className="relative flex-1">
+                        <input
+                          type="text"
+                          value={exercise.name}
+                          onChange={(e) => {
+                            const newExercises = [...exercises];
+                            newExercises[exIdx].name = e.target.value;
+                            setExercises(newExercises);
+
+                            // Generate suggestions
+                            if (e.target.value.length >= 2) {
+                              const results = fuse.search(e.target.value).slice(0, 5);
+                              setExerciseSuggestions(results.map(r => r.item));
+                              setActiveSuggestionIndex(-1);
+                            } else {
+                              setExerciseSuggestions([]);
+                            }
+                          }}
+                          onKeyDown={(e) => {
+                            if (exerciseSuggestions.length === 0) return;
+
+                            if (e.key === 'ArrowDown') {
+                              e.preventDefault();
+                              setActiveSuggestionIndex(prev =>
+                                Math.min(prev + 1, exerciseSuggestions.length - 1)
+                              );
+                            } else if (e.key === 'ArrowUp') {
+                              e.preventDefault();
+                              setActiveSuggestionIndex(prev => Math.max(prev - 1, -1));
+                            } else if (e.key === 'Enter' && activeSuggestionIndex >= 0) {
+                              e.preventDefault();
+                              const newExercises = [...exercises];
+                              newExercises[exIdx].name = exerciseSuggestions[activeSuggestionIndex];
+                              setExercises(newExercises);
+                              setExerciseSuggestions([]);
+                            } else if (e.key === 'Escape') {
+                              setExerciseSuggestions([]);
+                            }
+                          }}
+                          onBlur={() => {
+                            setTimeout(() => setExerciseSuggestions([]), 150);
+                          }}
+                          className="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded-lg font-semibold text-gray-100"
+                        />
+
+                        {/* Autocomplete dropdown */}
+                        {exerciseSuggestions.length > 0 && (
+                          <div className="absolute z-10 w-full mt-1 bg-gray-800 border border-gray-600 rounded-lg shadow-lg max-h-48 overflow-y-auto">
+                            {exerciseSuggestions.map((suggestion, idx) => (
+                              <button
+                                key={suggestion}
+                                onMouseDown={(e) => {
+                                  e.preventDefault();
+                                  const newExercises = [...exercises];
+                                  newExercises[exIdx].name = suggestion;
+                                  setExercises(newExercises);
+                                  setExerciseSuggestions([]);
+                                }}
+                                className={`w-full text-left px-3 py-2 text-gray-100 hover:bg-gray-700 ${
+                                  idx === activeSuggestionIndex ? 'bg-gray-700' : ''
+                                }`}
+                              >
+                                {suggestion}
+                              </button>
+                            ))}
+                          </div>
+                        )}
+                      </div>
                       <button
                         onClick={() => {
                           if (previousSession && previousSession.sets) {
@@ -1875,7 +1979,9 @@ const WorkoutTracker = () => {
                             newExercises[exIdx].sets = previousSession.sets.map(s =>
                               prevType === 'cardio'
                                 ? { distance: s.distance || '', time: s.time || '', unit: s.unit || 'miles' }
-                                : { weight: s.weight || '', reps: s.reps || '' }
+                                : prevType === 'tabata'
+                                  ? { rounds: s.rounds || '', workSeconds: s.workSeconds || '20', restSeconds: s.restSeconds || '10', calories: s.calories || '' }
+                                  : { weight: s.weight || '', reps: s.reps || '' }
                             );
                             setExercises(newExercises);
                           }
@@ -1952,7 +2058,8 @@ const WorkoutTracker = () => {
                           newExercises[exIdx].sets = newExercises[exIdx].sets.map(() => ({
                             rounds: '',
                             workSeconds: '20',
-                            restSeconds: '10'
+                            restSeconds: '10',
+                            calories: ''
                           }));
                           setExercises(newExercises);
                         }}
@@ -1988,7 +2095,7 @@ const WorkoutTracker = () => {
                               {(previousSession.type || 'strength') === 'cardio'
                                 ? `${prevSet.distance || '?'} ${prevSet.unit || 'mi'} in ${prevSet.time || '?'}`
                                 : (previousSession.type || 'strength') === 'tabata'
-                                  ? `${prevSet.rounds || '?'} rounds @ ${prevSet.workSeconds || '20'}s/${prevSet.restSeconds || '10'}s`
+                                  ? `${prevSet.rounds || '?'} rounds @ ${prevSet.workSeconds || '20'}s/${prevSet.restSeconds || '10'}s${prevSet.calories ? ` • ${prevSet.calories} kcal` : ''}`
                                   : `${prevSet.weight || '?'}lb × ${prevSet.reps || '?'}`}
                             </span>
                           ))}
@@ -2114,6 +2221,19 @@ const WorkoutTracker = () => {
                                 title="Rest interval in seconds"
                               />
                               <span className="text-gray-400">s</span>
+                              <input
+                                type="text"
+                                placeholder="Cal"
+                                value={set.calories || ''}
+                                onChange={(e) => {
+                                  const newExercises = [...exercises];
+                                  newExercises[exIdx].sets[setIdx].calories = e.target.value;
+                                  setExercises(newExercises);
+                                }}
+                                className="px-2 py-2 bg-gray-700 border border-gray-600 rounded-lg w-16 text-gray-100 text-center"
+                                title="Calories burned (from machine display)"
+                              />
+                              <span className="text-gray-400">kcal</span>
                               {/* Show total time */}
                               {set.rounds && (
                                 <span className="text-xs text-orange-400 bg-orange-950/30 px-2 py-1 rounded" title="Total workout time">
@@ -2263,15 +2383,26 @@ const WorkoutTracker = () => {
                         // Tabata summary
                         const totalRounds = exercise.sets.reduce((sum, s) => sum + (parseInt(s.rounds) || 0), 0);
                         const totalSets = exercise.sets.filter(s => parseInt(s.rounds) > 0).length;
+                        const totalCalories = exercise.sets.reduce((sum, s) => sum + (parseInt(s.calories) || 0), 0);
 
-                        if (totalRounds > 0) {
+                        if (totalRounds > 0 || totalCalories > 0) {
                           return (
                             <div className="mt-3 p-2 bg-gray-750 rounded border border-gray-600">
-                              <div className="flex items-center justify-between text-sm">
-                                <span className="text-gray-400">Total:</span>
-                                <span className="text-orange-400 font-medium">
-                                  {totalRounds} rounds across {totalSets} set{totalSets !== 1 ? 's' : ''}
-                                </span>
+                              <div className="grid grid-cols-2 gap-2 text-sm">
+                                <div>
+                                  <span className="text-gray-400">Total:</span>
+                                  <span className="text-orange-400 font-medium ml-2">
+                                    {totalRounds} rounds / {totalSets} set{totalSets !== 1 ? 's' : ''}
+                                  </span>
+                                </div>
+                                {totalCalories > 0 && (
+                                  <div className="text-right">
+                                    <span className="text-gray-400">Calories:</span>
+                                    <span className="text-orange-400 font-medium ml-2">
+                                      {totalCalories} kcal
+                                    </span>
+                                  </div>
+                                )}
                               </div>
                             </div>
                           );
