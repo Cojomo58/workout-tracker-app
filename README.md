@@ -49,9 +49,11 @@ A comprehensive periodized workout tracking application built with React. Track 
 - **Add/Remove Exercises**: Modify workouts on the fly
 
 ### Data Management
+- **Cloud Sync**: Optional Supabase integration to sync data across devices
 - **Local Storage**: All data saved in browser (no account needed)
 - **Export/Import**: Backup and restore your data as JSON
 - **Offline Support**: Works without internet connection
+- **Guest Mode**: Full functionality without signing in
 
 ### UI Features
 - **Helpful Tooltips**: Hover over elements for quick explanations
@@ -116,34 +118,64 @@ A comprehensive periodized workout tracking application built with React. Track 
    - Complete session history
    - Personal records
 
+### Cloud Sync (Optional)
+
+To sync your workout data across devices:
+
+1. Create a free account at [supabase.com](https://supabase.com)
+2. Create a new project and run the table setup SQL (see [CLAUDE.md](CLAUDE.md) for schema)
+3. Enable Email auth (and optionally Google OAuth) in Authentication > Providers
+4. Create a `.env.local` file in the project root:
+   ```
+   VITE_SUPABASE_URL=https://your-project.supabase.co
+   VITE_SUPABASE_ANON_KEY=your-anon-key
+   ```
+5. Restart the dev server -- a **Login** button will appear in the header
+6. Sign up or sign in with Google -- your data syncs automatically
+
+Without Supabase configured, the app works exactly as before with localStorage only.
+
 ### Backing Up Data
 
 1. Click **Backup/Restore** button
 2. Click **Export Data** to download JSON backup
 3. To restore: Click **Import Data** and select backup file
 
+Export/import works regardless of whether you're signed in.
+
 ## Tech Stack
 
 - **React 18**: UI framework
-- **Vite**: Build tool and dev server
-- **Tailwind CSS**: Styling
+- **Vite 6**: Build tool and dev server
+- **Tailwind CSS 3.4**: Styling
 - **Recharts**: Progress visualization charts
 - **Lucide React**: Icons
-- **localStorage**: Data persistence
+- **Fuse.js**: Fuzzy search for exercise names
+- **Supabase**: Auth + PostgreSQL cloud sync (optional)
+- **localStorage**: Offline data persistence
 
 ## Project Structure
 
 ```
 workout-tracker-app/
 ├── src/
-│   ├── App.jsx         # Main application component
-│   ├── main.jsx        # Application entry point
-│   └── index.css       # Global styles and animations
-├── index.html          # HTML template
-├── package.json        # Dependencies and scripts
-├── vite.config.js      # Vite configuration
-└── tailwind.config.js  # Tailwind configuration
+│   ├── App.jsx            # Main application component
+│   ├── supabaseClient.js  # Supabase client singleton
+│   ├── main.jsx           # Application entry point
+│   └── index.css          # Global styles and animations
+├── .env.local             # Supabase credentials (gitignored)
+├── index.html             # HTML template
+├── package.json           # Dependencies and scripts
+├── vite.config.js         # Vite configuration
+└── tailwind.config.js     # Tailwind configuration
 ```
+
+## Environment Variables
+
+| Variable | Required | Description |
+|----------|----------|-------------|
+| `VITE_SUPABASE_URL` | No | Supabase project URL |
+| `VITE_SUPABASE_ANON_KEY` | No | Supabase anon/public API key |
 
 ## Scripts
 

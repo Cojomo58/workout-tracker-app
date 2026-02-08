@@ -1,7 +1,8 @@
-import React, { useState, useMemo } from 'react';
-import { Plus, ChevronLeft, ChevronRight, TrendingUp, Calendar, Dumbbell, Save, X, History, Settings, Trash2, Edit3, Trophy } from 'lucide-react';
+import React, { useState, useMemo, useCallback, useRef } from 'react';
+import { Plus, ChevronLeft, ChevronRight, TrendingUp, Calendar, Dumbbell, Save, X, History, Settings, Trash2, Edit3, Trophy, LogIn, LogOut, Cloud, CloudOff } from 'lucide-react';
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
 import Fuse from 'fuse.js';
+import { supabase } from './supabaseClient';
 
 const WorkoutTracker = () => {
   const [view, setView] = useState('calendar');
@@ -74,6 +75,19 @@ const WorkoutTracker = () => {
   // Autocomplete State
   const [exerciseSuggestions, setExerciseSuggestions] = useState([]);
   const [activeSuggestionIndex, setActiveSuggestionIndex] = useState(-1);
+
+  // Auth & Sync State
+  const [user, setUser] = useState(null);
+  const [authLoading, setAuthLoading] = useState(true);
+  const [showAuthModal, setShowAuthModal] = useState(false);
+  const [authMode, setAuthMode] = useState('login');
+  const [authEmail, setAuthEmail] = useState('');
+  const [authPassword, setAuthPassword] = useState('');
+  const [authError, setAuthError] = useState('');
+  const [syncStatus, setSyncStatus] = useState('');
+  const [showMergeModal, setShowMergeModal] = useState(false);
+  const [cloudData, setCloudData] = useState(null);
+  const saveTimeoutRef = useRef(null);
 
   // Migrate PRs from historical workout data
   const migrateHistoricalPRs = (logs) => {
@@ -194,38 +208,144 @@ const WorkoutTracker = () => {
     return migratedPRs;
   };
 
-  // Load data on mount
+  // Auth listener
+  React.useEffect(() => {
+    if (!supabase) {
+      setAuthLoading(false);
+      return;
+    }
+
+    supabase.auth.getSession().then(({ data: { session } }) => {
+      setUser(session?.user ?? null);
+      setAuthLoading(false);
+    });
+
+    const { data: { subscription } } = supabase.auth.onAuthStateChange(
+      (_event, session) => {
+        setUser(session?.user ?? null);
+      }
+    );
+
+    return () => subscription.unsubscribe();
+  }, []);
+
+  // Load from localStorage helper
+  const loadFromLocalStorage = () => {
+    try {
+      const logs = localStorage.getItem('workout-logs');
+      const metrics = localStorage.getItem('weekly-metrics');
+      const savedBlocks = localStorage.getItem('workout-blocks');
+      const savedPRs = localStorage.getItem('personal-records');
+
+      const parsedLogs = logs ? JSON.parse(logs) : {};
+      const parsedMetrics = metrics ? JSON.parse(metrics) : {};
+
+      setWorkoutLogs(parsedLogs);
+      setWeeklyMetrics(parsedMetrics);
+      if (savedBlocks) setBlocks(JSON.parse(savedBlocks));
+
+      if (Object.keys(parsedLogs).length > 0) {
+        const migratedPRs = migrateHistoricalPRs(parsedLogs);
+        setPersonalRecords(migratedPRs);
+      } else if (savedPRs) {
+        setPersonalRecords(JSON.parse(savedPRs));
+      }
+    } catch (error) {
+      console.log('Error loading data:', error);
+      setStorageError('Error loading saved data');
+    }
+  };
+
+  // Load from Supabase cloud data helper
+  const loadFromCloud = (data) => {
+    const parsedLogs = data.workout_logs || {};
+    setWorkoutLogs(parsedLogs);
+    setWeeklyMetrics(data.weekly_metrics || {});
+    if (data.blocks && Array.isArray(data.blocks)) setBlocks(data.blocks);
+
+    if (Object.keys(parsedLogs).length > 0) {
+      const migratedPRs = migrateHistoricalPRs(parsedLogs);
+      setPersonalRecords(migratedPRs);
+    } else {
+      setPersonalRecords(data.personal_records || {});
+    }
+
+    // Cache in localStorage
+    try {
+      localStorage.setItem('workout-logs', JSON.stringify(parsedLogs));
+      localStorage.setItem('weekly-metrics', JSON.stringify(data.weekly_metrics || {}));
+      localStorage.setItem('workout-blocks', JSON.stringify(data.blocks || []));
+      localStorage.setItem('personal-records', JSON.stringify(data.personal_records || {}));
+    } catch (e) {
+      console.log('Error caching to localStorage:', e);
+    }
+  };
+
+  // Load data on mount or when user changes
   React.useEffect(() => {
     const loadData = async () => {
-      try {
-        const logs = localStorage.getItem('workout-logs');
-        const metrics = localStorage.getItem('weekly-metrics');
-        const savedBlocks = localStorage.getItem('workout-blocks');
-        const savedPRs = localStorage.getItem('personal-records');
+      setDataLoaded(false);
 
-        const parsedLogs = logs ? JSON.parse(logs) : {};
-        const parsedMetrics = metrics ? JSON.parse(metrics) : {};
+      if (user && supabase) {
+        try {
+          const { data, error } = await supabase
+            .from('user_data')
+            .select('*')
+            .eq('id', user.id)
+            .single();
 
-        setWorkoutLogs(parsedLogs);
-        setWeeklyMetrics(parsedMetrics);
-        if (savedBlocks) setBlocks(JSON.parse(savedBlocks));
+          if (error && error.code === 'PGRST116') {
+            // No row exists yet for this user
+            const localLogs = localStorage.getItem('workout-logs');
+            const hasLocalData = localLogs && Object.keys(JSON.parse(localLogs)).length > 0;
 
-        // Always recalculate PRs from historical data to ensure all exercises have PRs
-        if (Object.keys(parsedLogs).length > 0) {
-          const migratedPRs = migrateHistoricalPRs(parsedLogs);
-          setPersonalRecords(migratedPRs);
-        } else if (savedPRs) {
-          setPersonalRecords(JSON.parse(savedPRs));
+            if (hasLocalData) {
+              // Has local data to migrate - show merge modal
+              setShowMergeModal(true);
+              loadFromLocalStorage();
+            } else {
+              // Fresh user, create empty row
+              await supabase.from('user_data').insert({ id: user.id });
+              loadFromLocalStorage();
+            }
+          } else if (error) {
+            throw error;
+          } else {
+            // Got cloud data
+            const localLogs = localStorage.getItem('workout-logs');
+            const hasLocalData = localLogs && Object.keys(JSON.parse(localLogs)).length > 0;
+            const hasCloudData = data.workout_logs && Object.keys(data.workout_logs).length > 0;
+
+            if (hasLocalData && hasCloudData) {
+              // Both exist - offer merge choice
+              setCloudData(data);
+              setShowMergeModal(true);
+              loadFromLocalStorage();
+            } else if (hasCloudData) {
+              // Only cloud data
+              loadFromCloud(data);
+            } else {
+              // Only local or neither
+              loadFromLocalStorage();
+            }
+          }
+        } catch (error) {
+          console.error('Error loading from Supabase:', error);
+          setStorageError('Cloud sync error - using local data');
+          loadFromLocalStorage();
         }
-      } catch (error) {
-        console.log('Error loading data:', error);
-        setStorageError('Error loading saved data');
+      } else {
+        // Not logged in - use localStorage
+        loadFromLocalStorage();
       }
+
       setDataLoaded(true);
     };
 
-    loadData();
-  }, []);
+    if (!authLoading) {
+      loadData();
+    }
+  }, [user, authLoading]);
 
   // Save data
   React.useEffect(() => {
@@ -267,6 +387,44 @@ const WorkoutTracker = () => {
       }
     }
   }, [personalRecords, dataLoaded]);
+
+  // Debounced save to Supabase
+  const saveToSupabase = useCallback(() => {
+    if (!user || !supabase || !dataLoaded) return;
+
+    if (saveTimeoutRef.current) {
+      clearTimeout(saveTimeoutRef.current);
+    }
+
+    setSyncStatus('saving');
+
+    saveTimeoutRef.current = setTimeout(async () => {
+      try {
+        const { error } = await supabase
+          .from('user_data')
+          .upsert({
+            id: user.id,
+            workout_logs: workoutLogs,
+            weekly_metrics: weeklyMetrics,
+            blocks: blocks,
+            personal_records: personalRecords
+          });
+
+        if (error) throw error;
+        setSyncStatus('saved');
+        setTimeout(() => setSyncStatus(''), 2000);
+      } catch (error) {
+        console.error('Error saving to Supabase:', error);
+        setSyncStatus('error');
+        setTimeout(() => setSyncStatus(''), 3000);
+      }
+    }, 1000);
+  }, [user, workoutLogs, weeklyMetrics, blocks, personalRecords, dataLoaded]);
+
+  // Trigger Supabase sync when data changes
+  React.useEffect(() => {
+    saveToSupabase();
+  }, [saveToSupabase]);
 
   // Cardio Utility Functions
   const parseTimeToSeconds = (timeStr) => {
@@ -714,6 +872,77 @@ const WorkoutTracker = () => {
     reader.readAsText(file);
   };
 
+  // Auth handlers
+  const handleAuth = async (e) => {
+    e.preventDefault();
+    setAuthError('');
+
+    if (!supabase) {
+      setAuthError('Cloud sync not configured');
+      return;
+    }
+
+    try {
+      if (authMode === 'signup') {
+        const { error } = await supabase.auth.signUp({
+          email: authEmail,
+          password: authPassword
+        });
+        if (error) throw error;
+      } else {
+        const { error } = await supabase.auth.signInWithPassword({
+          email: authEmail,
+          password: authPassword
+        });
+        if (error) throw error;
+      }
+      setShowAuthModal(false);
+      setAuthEmail('');
+      setAuthPassword('');
+    } catch (error) {
+      setAuthError(error.message);
+    }
+  };
+
+  const handleLogout = async () => {
+    if (!supabase) return;
+    await supabase.auth.signOut();
+  };
+
+  const handleMergeChoice = async (choice) => {
+    if (choice === 'cloud' && cloudData) {
+      loadFromCloud(cloudData);
+    } else if (choice === 'local') {
+      // Keep local data -- it will auto-sync to Supabase via save effect
+    } else if (choice === 'merge' && cloudData) {
+      const mergedLogs = { ...workoutLogs };
+      if (cloudData.workout_logs) {
+        Object.entries(cloudData.workout_logs).forEach(([key, cloudEntry]) => {
+          const localEntry = mergedLogs[key];
+          if (localEntry && cloudEntry) {
+            const cloudDate = new Date(cloudEntry.date || 0);
+            const localDate = new Date(localEntry.date || 0);
+            if (cloudDate > localDate) {
+              mergedLogs[key] = cloudEntry;
+            }
+          } else if (!localEntry) {
+            mergedLogs[key] = cloudEntry;
+          }
+        });
+      }
+      setWorkoutLogs(mergedLogs);
+
+      const mergedMetrics = { ...(cloudData.weekly_metrics || {}), ...weeklyMetrics };
+      setWeeklyMetrics(mergedMetrics);
+
+      const migratedPRs = migrateHistoricalPRs(mergedLogs);
+      setPersonalRecords(migratedPRs);
+    }
+
+    setShowMergeModal(false);
+    setCloudData(null);
+  };
+
   const days = ['monday', 'tuesday', 'wednesday', 'thursday', 'friday'];
   const dayNames = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday'];
 
@@ -820,13 +1049,58 @@ const WorkoutTracker = () => {
       <div className="mb-6">
         <h1 className="text-2xl md:text-3xl font-bold text-gray-100 mb-2">Workout Tracker</h1>
         <div className="flex items-center justify-between">
-          <p className="text-gray-400">Periodized training with progression tracking</p>
-          <button
-            onClick={() => setShowExportImport(!showExportImport)}
-            className="px-3 py-1 bg-gray-700 hover:bg-gray-600 text-gray-200 rounded text-sm"
-          >
-            Backup/Restore
-          </button>
+          <p className="text-gray-400 text-sm md:text-base">Periodized training with progression tracking</p>
+          <div className="flex items-center gap-2">
+            {syncStatus === 'saving' && (
+              <span className="text-xs text-blue-400 flex items-center gap-1">
+                <Cloud className="w-3 h-3 animate-pulse" />
+                <span className="hidden sm:inline">Syncing...</span>
+              </span>
+            )}
+            {syncStatus === 'saved' && (
+              <span className="text-xs text-emerald-400 flex items-center gap-1">
+                <Cloud className="w-3 h-3" />
+                <span className="hidden sm:inline">Saved</span>
+              </span>
+            )}
+            {syncStatus === 'error' && (
+              <span className="text-xs text-red-400 flex items-center gap-1">
+                <CloudOff className="w-3 h-3" />
+                <span className="hidden sm:inline">Sync error</span>
+              </span>
+            )}
+            {!authLoading && supabase && (
+              user ? (
+                <div className="flex items-center gap-2">
+                  <span className="text-xs text-gray-400 hidden md:inline">{user.email}</span>
+                  <button
+                    onClick={handleLogout}
+                    className="px-2 py-1 bg-gray-700 hover:bg-gray-600 text-gray-300 rounded text-xs flex items-center gap-1"
+                    title="Sign out of cloud sync"
+                  >
+                    <LogOut className="w-3 h-3" />
+                    <span className="hidden sm:inline">Logout</span>
+                  </button>
+                </div>
+              ) : (
+                <button
+                  onClick={() => setShowAuthModal(true)}
+                  className="px-3 py-1 bg-blue-600 hover:bg-blue-700 text-white rounded text-sm flex items-center gap-1"
+                  title="Sign in to sync data across devices"
+                >
+                  <LogIn className="w-3 h-3" />
+                  Login
+                </button>
+              )
+            )}
+            <button
+              onClick={() => setShowExportImport(!showExportImport)}
+              className="px-3 py-1 bg-gray-700 hover:bg-gray-600 text-gray-200 rounded text-sm"
+              title="Export or import workout data backups"
+            >
+              Backup/Restore
+            </button>
+          </div>
         </div>
         {storageError && (
           <div className="mt-2 p-2 bg-yellow-900/30 border border-yellow-700 rounded text-yellow-400 text-xs">
@@ -2629,6 +2903,108 @@ const WorkoutTracker = () => {
             >
               Awesome! Continue
             </button>
+          </div>
+        </div>
+      )}
+
+      {/* Auth Modal */}
+      {showAuthModal && (
+        <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-50 p-4">
+          <div className="bg-gray-800 border border-gray-700 rounded-xl p-6 max-w-sm w-full">
+            <div className="flex justify-between items-center mb-4">
+              <h2 className="text-xl font-bold text-gray-100">
+                {authMode === 'login' ? 'Sign In' : 'Create Account'}
+              </h2>
+              <button
+                onClick={() => { setShowAuthModal(false); setAuthError(''); }}
+                className="text-gray-400 hover:text-gray-200"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+            <p className="text-sm text-gray-400 mb-4">
+              Sign in to sync your workouts across devices.
+            </p>
+
+            <form onSubmit={handleAuth} className="space-y-3">
+              <input
+                type="email"
+                placeholder="Email"
+                value={authEmail}
+                onChange={e => setAuthEmail(e.target.value)}
+                required
+                className="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded text-gray-100 text-sm focus:outline-none focus:border-blue-500"
+              />
+              <input
+                type="password"
+                placeholder="Password (min 6 chars)"
+                value={authPassword}
+                onChange={e => setAuthPassword(e.target.value)}
+                required
+                minLength={6}
+                className="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded text-gray-100 text-sm focus:outline-none focus:border-blue-500"
+              />
+              {authError && (
+                <p className="text-red-400 text-xs">{authError}</p>
+              )}
+              <button
+                type="submit"
+                className="w-full py-2 bg-blue-600 hover:bg-blue-700 text-white rounded font-medium"
+              >
+                {authMode === 'login' ? 'Sign In' : 'Sign Up'}
+              </button>
+            </form>
+            <p className="text-center text-sm text-gray-400 mt-3">
+              {authMode === 'login' ? (
+                <>No account?{' '}
+                  <button onClick={() => { setAuthMode('signup'); setAuthError(''); }}
+                    className="text-blue-400 hover:underline">Sign up</button>
+                </>
+              ) : (
+                <>Have an account?{' '}
+                  <button onClick={() => { setAuthMode('login'); setAuthError(''); }}
+                    className="text-blue-400 hover:underline">Sign in</button>
+                </>
+              )}
+            </p>
+          </div>
+        </div>
+      )}
+
+      {/* Merge Modal */}
+      {showMergeModal && (
+        <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-50 p-4">
+          <div className="bg-gray-800 border border-gray-700 rounded-xl p-6 max-w-sm w-full">
+            <h2 className="text-xl font-bold text-gray-100 mb-2">Data Found in Both Places</h2>
+            <p className="text-sm text-gray-400 mb-4">
+              You have workout data saved locally and in the cloud. What would you like to do?
+            </p>
+            <div className="space-y-2">
+              <button
+                onClick={() => handleMergeChoice('cloud')}
+                className="w-full py-2 bg-blue-600 hover:bg-blue-700 text-white rounded flex items-center justify-center gap-2"
+              >
+                <Cloud className="w-4 h-4" />
+                Use Cloud Data
+              </button>
+              <button
+                onClick={() => handleMergeChoice('local')}
+                className="w-full py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded flex items-center justify-center gap-2"
+              >
+                <Save className="w-4 h-4" />
+                Use Local Data
+              </button>
+              <button
+                onClick={() => handleMergeChoice('merge')}
+                className="w-full py-2 bg-yellow-600 hover:bg-yellow-700 text-white rounded flex items-center justify-center gap-2"
+              >
+                <TrendingUp className="w-4 h-4" />
+                Merge Both (combine workouts)
+              </button>
+            </div>
+            <p className="text-xs text-gray-500 mt-3">
+              "Merge" keeps all workouts from both sources. For duplicate days, the most recent version is kept.
+            </p>
           </div>
         </div>
       )}
