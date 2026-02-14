@@ -15,6 +15,7 @@ const WorkoutTracker = () => {
   const [logDate, setLogDate] = useState('');
   const [logHrv, setLogHrv] = useState('');
   const [exercises, setExercises] = useState([]);
+  const [prefilled, setPrefilled] = useState(false);
   
   const [blocks, setBlocks] = useState([
     {
@@ -2068,18 +2069,46 @@ const WorkoutTracker = () => {
                         setLogDate(existingLog.date);
                         setLogHrv(existingLog.hrv || '');
                         setExercises(existingLog.exercises);
+                        setPrefilled(false);
                       } else {
                         setLogDate(new Date().toISOString().split('T')[0]);
                         setLogHrv('');
-                        setExercises(workout?.exercises.map(ex => ({
-                          name: ex.name,
-                          technique: ex.technique,
-                          sets: Array(parseInt(ex.sets) || 3).fill(null).map(() => ({
-                            weight: '',
-                            reps: ''
-                          })),
-                          notes: ''
-                        })) || []);
+
+                        // Auto-populate from previous week's same day
+                        const prevWeekKey = currentWeek > 1
+                          ? `block${currentBlock}-week${currentWeek - 1}-${day}`
+                          : null;
+                        const prevWeekLog = prevWeekKey ? workoutLogs[prevWeekKey] : null;
+
+                        if (prevWeekLog && prevWeekLog.exercises && prevWeekLog.exercises.length > 0) {
+                          setExercises(prevWeekLog.exercises.map(ex => {
+                            const exType = ex.type || 'strength';
+                            return {
+                              name: ex.name,
+                              type: exType,
+                              sets: ex.sets.map(s =>
+                                exType === 'cardio'
+                                  ? { distance: s.distance || '', time: s.time || '', unit: s.unit || 'miles' }
+                                  : exType === 'tabata'
+                                    ? { rounds: s.rounds || '', workSeconds: s.workSeconds || '20', restSeconds: s.restSeconds || '10', calories: s.calories || '' }
+                                    : { weight: s.weight || '', reps: s.reps || '' }
+                              ),
+                              notes: ex.notes || ''
+                            };
+                          }));
+                          setPrefilled(true);
+                        } else {
+                          setExercises(workout?.exercises.map(ex => ({
+                            name: ex.name,
+                            technique: ex.technique,
+                            sets: Array(parseInt(ex.sets) || 3).fill(null).map(() => ({
+                              weight: '',
+                              reps: ''
+                            })),
+                            notes: ''
+                          })) || []);
+                          setPrefilled(false);
+                        }
                       }
                       setView('log');
                     }}
@@ -2131,7 +2160,7 @@ const WorkoutTracker = () => {
                 </p>
               </div>
               <button
-                onClick={() => setView('calendar')}
+                onClick={() => { setPrefilled(false); setView('calendar'); }}
                 className="p-2 rounded-lg hover:bg-gray-700 text-gray-300"
               >
                 <X className="w-5 h-5" />
@@ -2163,6 +2192,36 @@ const WorkoutTracker = () => {
                 </div>
               </div>
             </div>
+
+            {prefilled && (
+              <div className="flex items-center justify-between p-3 bg-purple-950/30 border border-purple-800/50 rounded-lg">
+                <div className="flex items-center gap-2">
+                  <History className="w-4 h-4 text-purple-400" />
+                  <span className="text-sm text-purple-300">
+                    Pre-filled from Week {currentWeek - 1} {selectedDay.charAt(0).toUpperCase() + selectedDay.slice(1)}
+                  </span>
+                </div>
+                <button
+                  onClick={() => {
+                    const workout = getCurrentTemplate()[selectedDay];
+                    setExercises(workout?.exercises.map(ex => ({
+                      name: ex.name,
+                      technique: ex.technique,
+                      sets: Array(parseInt(ex.sets) || 3).fill(null).map(() => ({
+                        weight: '',
+                        reps: ''
+                      })),
+                      notes: ''
+                    })) || []);
+                    setPrefilled(false);
+                  }}
+                  className="text-xs text-purple-400 hover:text-purple-300 underline"
+                  title="Clear pre-filled data and start from template"
+                >
+                  Clear
+                </button>
+              </div>
+            )}
 
             <div className="space-y-4">
               {exercises.map((exercise, exIdx) => {
@@ -2776,6 +2835,7 @@ const WorkoutTracker = () => {
                   setNewPRs(allPRs);
                   setShowPRModal(true);
                 } else {
+                  setPrefilled(false);
                   setView('calendar');
                 }
               }}
@@ -2897,6 +2957,7 @@ const WorkoutTracker = () => {
               onClick={() => {
                 setShowPRModal(false);
                 setNewPRs([]);
+                setPrefilled(false);
                 setView('calendar');
               }}
               className="w-full bg-yellow-500 hover:bg-yellow-600 text-gray-900 font-bold py-3 rounded-lg transition-colors"
