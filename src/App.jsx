@@ -1,5 +1,5 @@
 import React, { useState, useMemo, useCallback, useRef } from 'react';
-import { Plus, ChevronLeft, ChevronRight, TrendingUp, Calendar, Dumbbell, Save, X, History, Settings, Trash2, Edit3, Trophy, LogIn, LogOut, Cloud, CloudOff } from 'lucide-react';
+import { Plus, ChevronLeft, ChevronRight, TrendingUp, Calendar, Dumbbell, Save, X, History, Settings, Trash2, Edit3, Trophy, LogIn, LogOut } from 'lucide-react';
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
 import Fuse from 'fuse.js';
 import { supabase } from './supabaseClient';
@@ -61,8 +61,6 @@ const WorkoutTracker = () => {
   const [workoutLogs, setWorkoutLogs] = useState({});
   const [weeklyMetrics, setWeeklyMetrics] = useState({});
   const [dataLoaded, setDataLoaded] = useState(false);
-  const [storageError, setStorageError] = useState('');
-  const [showExportImport, setShowExportImport] = useState(false);
 
 
   // Personal Records State
@@ -85,9 +83,6 @@ const WorkoutTracker = () => {
   const [authEmail, setAuthEmail] = useState('');
   const [authPassword, setAuthPassword] = useState('');
   const [authError, setAuthError] = useState('');
-  const [syncStatus, setSyncStatus] = useState('');
-  const [showMergeModal, setShowMergeModal] = useState(false);
-  const [cloudData, setCloudData] = useState(null);
   const saveTimeoutRef = useRef(null);
 
   // Migrate PRs from historical workout data
@@ -253,7 +248,7 @@ const WorkoutTracker = () => {
       }
     } catch (error) {
       console.log('Error loading data:', error);
-      setStorageError('Error loading saved data');
+      console.error('Error loading saved data');
     }
   };
 
@@ -296,43 +291,23 @@ const WorkoutTracker = () => {
             .single();
 
           if (error && error.code === 'PGRST116') {
-            // No row exists yet for this user
-            const localLogs = localStorage.getItem('workout-logs');
-            const hasLocalData = localLogs && Object.keys(JSON.parse(localLogs)).length > 0;
-
-            if (hasLocalData) {
-              // Has local data to migrate - show merge modal
-              setShowMergeModal(true);
-              loadFromLocalStorage();
-            } else {
-              // Fresh user, create empty row
-              await supabase.from('user_data').insert({ id: user.id });
-              loadFromLocalStorage();
-            }
+            // No row exists yet — load local data, it will auto-sync to cloud
+            await supabase.from('user_data').insert({ id: user.id });
+            loadFromLocalStorage();
           } else if (error) {
             throw error;
           } else {
-            // Got cloud data
-            const localLogs = localStorage.getItem('workout-logs');
-            const hasLocalData = localLogs && Object.keys(JSON.parse(localLogs)).length > 0;
+            // Always prefer cloud data
             const hasCloudData = data.workout_logs && Object.keys(data.workout_logs).length > 0;
-
-            if (hasLocalData && hasCloudData) {
-              // Both exist - offer merge choice
-              setCloudData(data);
-              setShowMergeModal(true);
-              loadFromLocalStorage();
-            } else if (hasCloudData) {
-              // Only cloud data
+            if (hasCloudData) {
               loadFromCloud(data);
             } else {
-              // Only local or neither
               loadFromLocalStorage();
             }
           }
         } catch (error) {
+          // No internet or Supabase error — silently fall back to local
           console.error('Error loading from Supabase:', error);
-          setStorageError('Cloud sync error - using local data');
           loadFromLocalStorage();
         }
       } else {
@@ -397,8 +372,6 @@ const WorkoutTracker = () => {
       clearTimeout(saveTimeoutRef.current);
     }
 
-    setSyncStatus('saving');
-
     saveTimeoutRef.current = setTimeout(async () => {
       try {
         const { error } = await supabase
@@ -412,12 +385,8 @@ const WorkoutTracker = () => {
           });
 
         if (error) throw error;
-        setSyncStatus('saved');
-        setTimeout(() => setSyncStatus(''), 2000);
       } catch (error) {
         console.error('Error saving to Supabase:', error);
-        setSyncStatus('error');
-        setTimeout(() => setSyncStatus(''), 3000);
       }
     }, 1000);
   }, [user, workoutLogs, weeklyMetrics, blocks, personalRecords, dataLoaded]);
@@ -910,40 +879,6 @@ const WorkoutTracker = () => {
     await supabase.auth.signOut();
   };
 
-  const handleMergeChoice = async (choice) => {
-    if (choice === 'cloud' && cloudData) {
-      loadFromCloud(cloudData);
-    } else if (choice === 'local') {
-      // Keep local data -- it will auto-sync to Supabase via save effect
-    } else if (choice === 'merge' && cloudData) {
-      const mergedLogs = { ...workoutLogs };
-      if (cloudData.workout_logs) {
-        Object.entries(cloudData.workout_logs).forEach(([key, cloudEntry]) => {
-          const localEntry = mergedLogs[key];
-          if (localEntry && cloudEntry) {
-            const cloudDate = new Date(cloudEntry.date || 0);
-            const localDate = new Date(localEntry.date || 0);
-            if (cloudDate > localDate) {
-              mergedLogs[key] = cloudEntry;
-            }
-          } else if (!localEntry) {
-            mergedLogs[key] = cloudEntry;
-          }
-        });
-      }
-      setWorkoutLogs(mergedLogs);
-
-      const mergedMetrics = { ...(cloudData.weekly_metrics || {}), ...weeklyMetrics };
-      setWeeklyMetrics(mergedMetrics);
-
-      const migratedPRs = migrateHistoricalPRs(mergedLogs);
-      setPersonalRecords(migratedPRs);
-    }
-
-    setShowMergeModal(false);
-    setCloudData(null);
-  };
-
   const days = ['monday', 'tuesday', 'wednesday', 'thursday', 'friday'];
   const dayNames = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday'];
 
@@ -1052,24 +987,6 @@ const WorkoutTracker = () => {
         <div className="flex items-center justify-between">
           <p className="text-gray-400 text-sm md:text-base">Periodized training with progression tracking</p>
           <div className="flex items-center gap-2">
-            {syncStatus === 'saving' && (
-              <span className="text-xs text-blue-400 flex items-center gap-1">
-                <Cloud className="w-3 h-3 animate-pulse" />
-                <span className="hidden sm:inline">Syncing...</span>
-              </span>
-            )}
-            {syncStatus === 'saved' && (
-              <span className="text-xs text-emerald-400 flex items-center gap-1">
-                <Cloud className="w-3 h-3" />
-                <span className="hidden sm:inline">Saved</span>
-              </span>
-            )}
-            {syncStatus === 'error' && (
-              <span className="text-xs text-red-400 flex items-center gap-1">
-                <CloudOff className="w-3 h-3" />
-                <span className="hidden sm:inline">Sync error</span>
-              </span>
-            )}
             {!authLoading && supabase && (
               user ? (
                 <div className="flex items-center gap-2">
@@ -1094,46 +1011,8 @@ const WorkoutTracker = () => {
                 </button>
               )
             )}
-            <button
-              onClick={() => setShowExportImport(!showExportImport)}
-              className="px-3 py-1 bg-gray-700 hover:bg-gray-600 text-gray-200 rounded text-sm"
-              title="Export or import workout data backups"
-            >
-              Backup/Restore
-            </button>
           </div>
         </div>
-        {storageError && (
-          <div className="mt-2 p-2 bg-yellow-900/30 border border-yellow-700 rounded text-yellow-400 text-xs">
-            {storageError}
-          </div>
-        )}
-        {showExportImport && (
-          <div className="mt-3 p-4 bg-gray-800 border border-gray-700 rounded-lg space-y-3">
-            <button
-              onClick={exportData}
-              className="w-full px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg flex items-center justify-center gap-2"
-              title="Download all data as a backup file"
-            >
-              <Save className="w-4 h-4" />
-              Export Data (Download Backup)
-            </button>
-            <div>
-              <label className="block w-full px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-center cursor-pointer" title="Restore from a backup file">
-                <input
-                  type="file"
-                  accept=".json"
-                  onChange={importData}
-                  className="hidden"
-                />
-                Import Data (Restore Backup)
-              </label>
-            </div>
-            <p className="text-xs text-gray-400">
-              Export downloads your data. Import replaces current data with backup file.
-            </p>
-          </div>
-        )}
       </div>
 
       <div className="flex gap-1 md:gap-2 mb-6 border-b border-gray-700">
@@ -3032,43 +2911,6 @@ const WorkoutTracker = () => {
         </div>
       )}
 
-      {/* Merge Modal */}
-      {showMergeModal && (
-        <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-50 p-4">
-          <div className="bg-gray-800 border border-gray-700 rounded-xl p-6 max-w-sm w-full">
-            <h2 className="text-xl font-bold text-gray-100 mb-2">Data Found in Both Places</h2>
-            <p className="text-sm text-gray-400 mb-4">
-              You have workout data saved locally and in the cloud. What would you like to do?
-            </p>
-            <div className="space-y-2">
-              <button
-                onClick={() => handleMergeChoice('cloud')}
-                className="w-full py-2 bg-blue-600 hover:bg-blue-700 text-white rounded flex items-center justify-center gap-2"
-              >
-                <Cloud className="w-4 h-4" />
-                Use Cloud Data
-              </button>
-              <button
-                onClick={() => handleMergeChoice('local')}
-                className="w-full py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded flex items-center justify-center gap-2"
-              >
-                <Save className="w-4 h-4" />
-                Use Local Data
-              </button>
-              <button
-                onClick={() => handleMergeChoice('merge')}
-                className="w-full py-2 bg-yellow-600 hover:bg-yellow-700 text-white rounded flex items-center justify-center gap-2"
-              >
-                <TrendingUp className="w-4 h-4" />
-                Merge Both (combine workouts)
-              </button>
-            </div>
-            <p className="text-xs text-gray-500 mt-3">
-              "Merge" keeps all workouts from both sources. For duplicate days, the most recent version is kept.
-            </p>
-          </div>
-        </div>
-      )}
     </div>
   );
 };
