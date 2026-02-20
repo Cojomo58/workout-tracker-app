@@ -36,7 +36,6 @@ workout-tracker-app/
 workoutLogs = {
   "block1-week1-monday": {
     date: "2024-01-15",
-    hrv: "45",
     exercises: [{ name, type, sets, notes }],
     prsHit: 2
   }
@@ -53,6 +52,9 @@ workoutLogs = {
 
 // Tabata
 { rounds: "8", workSeconds: "20", restSeconds: "10", calories: "150" }
+
+// Bodyweight
+{ reps: "25", holdTime: "60" }  // holdTime in seconds
 ```
 
 ### Personal Records
@@ -70,6 +72,10 @@ personalRecords = {
   "Bike Tabata": {
     mostRounds: { value, workSeconds, restSeconds },
     mostSets: { value }
+  },
+  "Push-ups": {
+    maxReps: { value, date },
+    longestHold: { value, date }
   }
 }
 ```
@@ -104,6 +110,7 @@ On login with data in both places, a merge modal offers: Use Cloud / Use Local /
   - **Emerald (green)**: Strength, improvements, success
   - **Blue**: Cardio, matched performance, cloud sync
   - **Orange**: Tabata/HIIT
+  - **Violet/Purple**: Bodyweight exercises
   - **Red**: Deletions, decreases
   - **Gold/Yellow**: PRs and celebrations
 - All interactive elements have `title` attributes for tooltips

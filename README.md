@@ -1,19 +1,19 @@
 # Workout Tracker
 
-A comprehensive periodized workout tracking application built with React. Track your strength training, cardio, and Tabata workouts, monitor personal records, visualize progression with charts, and fully customize your training templates.
+A comprehensive periodized workout tracking application built with React. Track your strength training, cardio, Tabata, and bodyweight workouts, monitor personal records, visualize progression with charts, and fully customize your training templates.
 
 ## Features
 
 ### Core Tracking
 - **Calendar View**: Weekly workout planning with customizable training blocks
 - **Exercise Logging**: Track weight, reps, and sets for each exercise
-- **HRV Monitoring**: Track overnight HRV to monitor recovery
 - **Body Weight Tracking**: Monitor weight changes throughout training blocks
 
 ### Workout Types
 - **Strength Training**: Track weight and reps with volume calculations
 - **Cardio**: Track distance, time, and pace
 - **Tabata/HIIT**: Track rounds completed with customizable work/rest intervals (default 20s/10s)
+- **Bodyweight**: Track reps and hold time for exercises like push-ups, planks, and pull-ups
 
 ### Progressive Overload System
 - **Previous Session Display**: See your last workout data while logging
