@@ -1,5 +1,5 @@
 import React, { useState, useMemo, useCallback, useRef } from 'react';
-import { Plus, ChevronLeft, ChevronRight, TrendingUp, Calendar, Dumbbell, Save, X, History, Settings, Trash2, Edit3, Trophy, LogIn, LogOut } from 'lucide-react';
+import { Plus, ChevronLeft, ChevronRight, TrendingUp, Calendar, Dumbbell, Save, X, History, Settings, Trash2, Edit3, Trophy, LogIn, LogOut, GripVertical } from 'lucide-react';
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
 import Fuse from 'fuse.js';
 import { supabase } from './supabaseClient';
@@ -16,6 +16,8 @@ const WorkoutTracker = () => {
 
   const [exercises, setExercises] = useState([]);
   const [prefilled, setPrefilled] = useState(false);
+  const [draggedExIdx, setDraggedExIdx] = useState(null);
+  const [dragOverExIdx, setDragOverExIdx] = useState(null);
   
   const [blocks, setBlocks] = useState([
     {
@@ -2151,8 +2153,36 @@ const WorkoutTracker = () => {
                   : null;
 
                 return (
-                  <div key={exIdx} className="bg-gray-800 p-4 rounded-lg border border-gray-700">
+                  <div
+                    key={exIdx}
+                    className={`bg-gray-800 p-4 rounded-lg border transition-all ${
+                      draggedExIdx === exIdx
+                        ? 'opacity-40 border-gray-500'
+                        : dragOverExIdx === exIdx
+                        ? 'border-blue-500'
+                        : 'border-gray-700'
+                    }`}
+                    draggable
+                    onDragStart={() => setDraggedExIdx(exIdx)}
+                    onDragOver={(e) => { e.preventDefault(); setDragOverExIdx(exIdx); }}
+                    onDragLeave={() => setDragOverExIdx(null)}
+                    onDrop={() => {
+                      if (draggedExIdx === null || draggedExIdx === exIdx) {
+                        setDraggedExIdx(null);
+                        setDragOverExIdx(null);
+                        return;
+                      }
+                      const newExercises = [...exercises];
+                      const [moved] = newExercises.splice(draggedExIdx, 1);
+                      newExercises.splice(exIdx, 0, moved);
+                      setExercises(newExercises);
+                      setDraggedExIdx(null);
+                      setDragOverExIdx(null);
+                    }}
+                    onDragEnd={() => { setDraggedExIdx(null); setDragOverExIdx(null); }}
+                  >
                     <div className="mb-3 flex items-center gap-2">
+                      <GripVertical size={16} className="text-gray-500 cursor-grab flex-shrink-0" title="Drag to reorder" />
                       <div className="relative flex-1">
                         <input
                           type="text"
