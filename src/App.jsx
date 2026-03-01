@@ -6,8 +6,11 @@ import { supabase } from './supabaseClient';
 
 const WorkoutTracker = () => {
   const [view, setView] = useState('calendar');
-  const [currentBlock] = useState(1);
+  const [currentBlock, setCurrentBlock] = useState(1);
   const [currentWeek, setCurrentWeek] = useState(1);
+  const [blockMetadata, setBlockMetadata] = useState({});
+  const [showNewBlockModal, setShowNewBlockModal] = useState(false);
+  const [newBlockName, setNewBlockName] = useState('');
   const [selectedDay, setSelectedDay] = useState(null);
   const [selectedExerciseHistory, setSelectedExerciseHistory] = useState(null);
   const [exerciseSearchTerm, setExerciseSearchTerm] = useState('');
@@ -247,6 +250,8 @@ const WorkoutTracker = () => {
       const metrics = localStorage.getItem('weekly-metrics');
       const savedBlocks = localStorage.getItem('workout-blocks');
       const savedPRs = localStorage.getItem('personal-records');
+      const savedCurrentBlock = localStorage.getItem('current-block');
+      const savedBlockMetadata = localStorage.getItem('block-metadata');
 
       const parsedLogs = logs ? JSON.parse(logs) : {};
       const parsedMetrics = metrics ? JSON.parse(metrics) : {};
@@ -254,6 +259,23 @@ const WorkoutTracker = () => {
       setWorkoutLogs(parsedLogs);
       setWeeklyMetrics(parsedMetrics);
       if (savedBlocks) setBlocks(JSON.parse(savedBlocks));
+
+      if (savedCurrentBlock) setCurrentBlock(parseInt(savedCurrentBlock) || 1);
+
+      if (savedBlockMetadata) {
+        setBlockMetadata(JSON.parse(savedBlockMetadata));
+      } else {
+        // Seed block 1 metadata — infer start date from earliest log if possible
+        const block1Dates = Object.entries(parsedLogs)
+          .filter(([k]) => k.startsWith('block1-'))
+          .map(([, v]) => v.date)
+          .filter(Boolean)
+          .sort();
+        const startDate = block1Dates[0] || new Date().toISOString().split('T')[0];
+        const seed = { 1: { name: 'Block 1', startDate } };
+        setBlockMetadata(seed);
+        localStorage.setItem('block-metadata', JSON.stringify(seed));
+      }
 
       if (Object.keys(parsedLogs).length > 0) {
         const migratedPRs = migrateHistoricalPRs(parsedLogs);
@@ -274,6 +296,21 @@ const WorkoutTracker = () => {
     setWeeklyMetrics(data.weekly_metrics || {});
     if (data.blocks && Array.isArray(data.blocks)) setBlocks(data.blocks);
 
+    if (data.current_block) setCurrentBlock(data.current_block);
+
+    if (data.block_metadata && Object.keys(data.block_metadata).length > 0) {
+      setBlockMetadata(data.block_metadata);
+    } else {
+      // Seed block 1 metadata from earliest log date
+      const block1Dates = Object.entries(parsedLogs)
+        .filter(([k]) => k.startsWith('block1-'))
+        .map(([, v]) => v.date)
+        .filter(Boolean)
+        .sort();
+      const startDate = block1Dates[0] || new Date().toISOString().split('T')[0];
+      setBlockMetadata({ 1: { name: 'Block 1', startDate } });
+    }
+
     if (Object.keys(parsedLogs).length > 0) {
       const migratedPRs = migrateHistoricalPRs(parsedLogs);
       setPersonalRecords(migratedPRs);
@@ -287,6 +324,8 @@ const WorkoutTracker = () => {
       localStorage.setItem('weekly-metrics', JSON.stringify(data.weekly_metrics || {}));
       localStorage.setItem('workout-blocks', JSON.stringify(data.blocks || []));
       localStorage.setItem('personal-records', JSON.stringify(data.personal_records || {}));
+      if (data.current_block) localStorage.setItem('current-block', JSON.stringify(data.current_block));
+      if (data.block_metadata) localStorage.setItem('block-metadata', JSON.stringify(data.block_metadata));
     } catch (e) {
       console.log('Error caching to localStorage:', e);
     }
@@ -379,6 +418,26 @@ const WorkoutTracker = () => {
     }
   }, [personalRecords, dataLoaded]);
 
+  React.useEffect(() => {
+    if (dataLoaded) {
+      try {
+        localStorage.setItem('current-block', JSON.stringify(currentBlock));
+      } catch (error) {
+        console.error('Error saving current block:', error);
+      }
+    }
+  }, [currentBlock, dataLoaded]);
+
+  React.useEffect(() => {
+    if (dataLoaded) {
+      try {
+        localStorage.setItem('block-metadata', JSON.stringify(blockMetadata));
+      } catch (error) {
+        console.error('Error saving block metadata:', error);
+      }
+    }
+  }, [blockMetadata, dataLoaded]);
+
   // Debounced save to Supabase
   const saveToSupabase = useCallback(() => {
     if (!user || !supabase || !dataLoaded) return;
@@ -396,7 +455,9 @@ const WorkoutTracker = () => {
             workout_logs: workoutLogs,
             weekly_metrics: weeklyMetrics,
             blocks: blocks,
-            personal_records: personalRecords
+            personal_records: personalRecords,
+            current_block: currentBlock,
+            block_metadata: blockMetadata
           });
 
         if (error) throw error;
@@ -404,7 +465,7 @@ const WorkoutTracker = () => {
         console.error('Error saving to Supabase:', error);
       }
     }, 1000);
-  }, [user, workoutLogs, weeklyMetrics, blocks, personalRecords, dataLoaded]);
+  }, [user, workoutLogs, weeklyMetrics, blocks, personalRecords, currentBlock, blockMetadata, dataLoaded]);
 
   // Trigger Supabase sync when data changes
   React.useEffect(() => {
@@ -852,8 +913,10 @@ const WorkoutTracker = () => {
       weeklyMetrics,
       blocks,
       personalRecords,
+      currentBlock,
+      blockMetadata,
       exportDate: new Date().toISOString(),
-      version: '1.4'
+      version: '2.0'
     };
     
     const jsonString = JSON.stringify(data, null, 2);
@@ -888,6 +951,8 @@ const WorkoutTracker = () => {
         if (data.workoutLogs) setWorkoutLogs(data.workoutLogs);
         if (data.weeklyMetrics) setWeeklyMetrics(data.weeklyMetrics);
         if (data.blocks) setBlocks(data.blocks);
+        if (data.currentBlock) setCurrentBlock(data.currentBlock);
+        if (data.blockMetadata) setBlockMetadata(data.blockMetadata);
         if (data.personalRecords) {
           setPersonalRecords(data.personalRecords);
         } else if (data.workoutLogs) {
@@ -945,8 +1010,20 @@ const WorkoutTracker = () => {
   const dayNames = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday'];
 
   const getCurrentTemplate = () => {
-    return blocks[currentBlock - 1]?.template || {};
+    return blocks[0]?.template || {};
   };
+
+  // Highest block number that has any data (logs or metadata)
+  const highestBlockWithData = useMemo(() => {
+    const fromLogs = Object.keys(workoutLogs)
+      .map(k => parseInt(k.match(/^block(\d+)-/)?.[1] || 0))
+      .filter(n => n > 0);
+    const fromMeta = Object.keys(blockMetadata).map(k => parseInt(k)).filter(n => n > 0);
+    const all = [...fromLogs, ...fromMeta, currentBlock];
+    return Math.max(...all);
+  }, [workoutLogs, blockMetadata, currentBlock]);
+
+  const isViewingCurrentBlock = currentBlock === highestBlockWithData;
 
   const formatDate = (dateString) => {
     if (!dateString) return '';
@@ -1141,17 +1218,21 @@ const WorkoutTracker = () => {
               const weightHistory = Object.entries(weeklyMetrics)
                 .filter(([, data]) => data.bodyWeight && parseFloat(data.bodyWeight) > 0)
                 .map(([key, data]) => {
-                  // Parse week info from key (e.g., "block1-week1")
+                  // Parse block and week from key (e.g., "block2-week3")
                   const match = key.match(/block(\d+)-week(\d+)/);
+                  const blockNum = match ? parseInt(match[1]) : 0;
                   const weekNum = match ? parseInt(match[2]) : 0;
                   return {
                     weekKey: key,
                     week: weekNum,
+                    blockNum,
+                    sortIndex: blockNum * 1000 + weekNum,
                     weight: parseFloat(data.bodyWeight),
-                    date: data.lastUpdated || `Week ${weekNum}`
+                    date: data.lastUpdated || `B${blockNum}W${weekNum}`,
+                    label: `B${blockNum}W${weekNum}`
                   };
                 })
-                .sort((a, b) => a.week - b.week);
+                .sort((a, b) => a.sortIndex - b.sortIndex);
 
               const latestWeight = weightHistory.length > 0 ? weightHistory[weightHistory.length - 1].weight : null;
               const previousWeight = weightHistory.length > 1 ? weightHistory[weightHistory.length - 2].weight : null;
@@ -1193,7 +1274,7 @@ const WorkoutTracker = () => {
                       <h3 className="font-semibold text-orange-400 mb-4">Body Weight Trend (By Week)</h3>
                       <div className="p-4 bg-gray-900/50 rounded-lg border border-gray-600">
                         <ResponsiveContainer width="100%" height={150}>
-                          <LineChart data={recentHistory.map(h => ({ date: `Wk ${h.week}`, value: h.weight }))}>
+                          <LineChart data={recentHistory.map(h => ({ date: h.label, value: h.weight }))}>
                             <CartesianGrid strokeDasharray="3 3" stroke="#374151" />
                             <XAxis dataKey="date" stroke="#9ca3af" tick={{ fill: '#9ca3af', fontSize: 10 }} />
                             <YAxis stroke="#9ca3af" tick={{ fill: '#9ca3af', fontSize: 10 }} domain={['dataMin - 2', 'dataMax + 2']} />
@@ -1687,17 +1768,21 @@ const WorkoutTracker = () => {
               </h3>
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                 <div>
-                  <label className="text-xs text-gray-400 block mb-2">Block Name</label>
+                  <label className="text-xs text-gray-400 block mb-2">Training Cycle Name (Block {currentBlock})</label>
                   <input
                     type="text"
-                    value={blocks[currentBlock - 1]?.name || ''}
+                    value={blockMetadata[currentBlock]?.name || ''}
                     onChange={(e) => {
-                      const newBlocks = [...blocks];
-                      newBlocks[currentBlock - 1].name = e.target.value;
-                      setBlocks(newBlocks);
+                      setBlockMetadata({
+                        ...blockMetadata,
+                        [currentBlock]: {
+                          ...blockMetadata[currentBlock],
+                          name: e.target.value
+                        }
+                      });
                     }}
                     className="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded-lg text-gray-100"
-                    placeholder="e.g., Block A - Hypertrophy Focus"
+                    placeholder={`e.g., Spring 2025 Hypertrophy`}
                   />
                 </div>
                 <div>
@@ -1706,10 +1791,10 @@ const WorkoutTracker = () => {
                     type="number"
                     min="1"
                     max="52"
-                    value={blocks[currentBlock - 1]?.weeks || 4}
+                    value={blocks[0]?.weeks || 4}
                     onChange={(e) => {
                       const newBlocks = [...blocks];
-                      newBlocks[currentBlock - 1].weeks = parseInt(e.target.value) || 4;
+                      newBlocks[0].weeks = parseInt(e.target.value) || 4;
                       setBlocks(newBlocks);
                     }}
                     className="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded-lg text-gray-100"
@@ -1725,7 +1810,7 @@ const WorkoutTracker = () => {
                 <button
                   onClick={() => {
                     const newBlocks = [...blocks];
-                    const template = newBlocks[currentBlock - 1].template;
+                    const template = newBlocks[0].template;
                     const existingDays = Object.keys(template);
                     const allDays = ['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday'];
                     const availableDays = allDays.filter(d => !existingDays.includes(d));
@@ -1745,7 +1830,7 @@ const WorkoutTracker = () => {
                 </button>
               </div>
 
-              {Object.entries(blocks[currentBlock - 1]?.template || {}).map(([dayKey, dayData]) => (
+              {Object.entries(blocks[0]?.template || {}).map(([dayKey, dayData]) => (
                 <div key={dayKey} className="bg-gray-800 p-4 rounded-lg border border-gray-700">
                   <div className="flex items-center justify-between mb-4">
                     <div className="flex items-center gap-3 flex-1">
@@ -1753,7 +1838,7 @@ const WorkoutTracker = () => {
                         value={dayKey}
                         onChange={(e) => {
                           const newBlocks = [...blocks];
-                          const template = newBlocks[currentBlock - 1].template;
+                          const template = newBlocks[0].template;
                           const newDayKey = e.target.value;
                           if (newDayKey !== dayKey && !template[newDayKey]) {
                             template[newDayKey] = template[dayKey];
@@ -1764,7 +1849,7 @@ const WorkoutTracker = () => {
                         className="px-3 py-2 bg-gray-700 border border-gray-600 rounded-lg text-gray-100 font-medium"
                       >
                         {['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday'].map(d => (
-                          <option key={d} value={d} disabled={d !== dayKey && blocks[currentBlock - 1]?.template[d]}>
+                          <option key={d} value={d} disabled={d !== dayKey && blocks[0]?.template[d]}>
                             {d.charAt(0).toUpperCase() + d.slice(1)}
                           </option>
                         ))}
@@ -1774,7 +1859,7 @@ const WorkoutTracker = () => {
                         value={dayData.name}
                         onChange={(e) => {
                           const newBlocks = [...blocks];
-                          newBlocks[currentBlock - 1].template[dayKey].name = e.target.value;
+                          newBlocks[0].template[dayKey].name = e.target.value;
                           setBlocks(newBlocks);
                         }}
                         className="flex-1 px-3 py-2 bg-gray-700 border border-gray-600 rounded-lg text-gray-100"
@@ -1785,7 +1870,7 @@ const WorkoutTracker = () => {
                       onClick={() => {
                         if (window.confirm(`Remove ${dayKey.charAt(0).toUpperCase() + dayKey.slice(1)} from template?`)) {
                           const newBlocks = [...blocks];
-                          delete newBlocks[currentBlock - 1].template[dayKey];
+                          delete newBlocks[0].template[dayKey];
                           setBlocks(newBlocks);
                         }
                       }}
@@ -1806,7 +1891,7 @@ const WorkoutTracker = () => {
                             value={exercise.name}
                             onChange={(e) => {
                               const newBlocks = [...blocks];
-                              newBlocks[currentBlock - 1].template[dayKey].exercises[exIdx].name = e.target.value;
+                              newBlocks[0].template[dayKey].exercises[exIdx].name = e.target.value;
                               setBlocks(newBlocks);
                             }}
                             className="flex-1 px-3 py-2 bg-gray-700 border border-gray-600 rounded-lg text-gray-100 text-sm"
@@ -1815,7 +1900,7 @@ const WorkoutTracker = () => {
                           <button
                             onClick={() => {
                               const newBlocks = [...blocks];
-                              newBlocks[currentBlock - 1].template[dayKey].exercises = dayData.exercises.filter((_, i) => i !== exIdx);
+                              newBlocks[0].template[dayKey].exercises = dayData.exercises.filter((_, i) => i !== exIdx);
                               setBlocks(newBlocks);
                             }}
                             className="p-2 hover:bg-red-600/20 text-red-400 rounded"
@@ -1831,7 +1916,7 @@ const WorkoutTracker = () => {
                               value={exercise.sets}
                               onChange={(e) => {
                                 const newBlocks = [...blocks];
-                                newBlocks[currentBlock - 1].template[dayKey].exercises[exIdx].sets = e.target.value;
+                                newBlocks[0].template[dayKey].exercises[exIdx].sets = e.target.value;
                                 setBlocks(newBlocks);
                               }}
                               className="w-full px-2 py-1 bg-gray-700 border border-gray-600 rounded text-gray-100 text-sm"
@@ -1845,7 +1930,7 @@ const WorkoutTracker = () => {
                               value={exercise.reps}
                               onChange={(e) => {
                                 const newBlocks = [...blocks];
-                                newBlocks[currentBlock - 1].template[dayKey].exercises[exIdx].reps = e.target.value;
+                                newBlocks[0].template[dayKey].exercises[exIdx].reps = e.target.value;
                                 setBlocks(newBlocks);
                               }}
                               className="w-full px-2 py-1 bg-gray-700 border border-gray-600 rounded text-gray-100 text-sm"
@@ -1859,7 +1944,7 @@ const WorkoutTracker = () => {
                               value={exercise.technique || ''}
                               onChange={(e) => {
                                 const newBlocks = [...blocks];
-                                newBlocks[currentBlock - 1].template[dayKey].exercises[exIdx].technique = e.target.value;
+                                newBlocks[0].template[dayKey].exercises[exIdx].technique = e.target.value;
                                 setBlocks(newBlocks);
                               }}
                               className="w-full px-2 py-1 bg-gray-700 border border-gray-600 rounded text-gray-100 text-sm"
@@ -1873,7 +1958,7 @@ const WorkoutTracker = () => {
                               value={exercise.rest || ''}
                               onChange={(e) => {
                                 const newBlocks = [...blocks];
-                                newBlocks[currentBlock - 1].template[dayKey].exercises[exIdx].rest = e.target.value;
+                                newBlocks[0].template[dayKey].exercises[exIdx].rest = e.target.value;
                                 setBlocks(newBlocks);
                               }}
                               className="w-full px-2 py-1 bg-gray-700 border border-gray-600 rounded text-gray-100 text-sm"
@@ -1887,7 +1972,7 @@ const WorkoutTracker = () => {
                     <button
                       onClick={() => {
                         const newBlocks = [...blocks];
-                        newBlocks[currentBlock - 1].template[dayKey].exercises.push({
+                        newBlocks[0].template[dayKey].exercises.push({
                           name: '',
                           sets: '3',
                           reps: '8-12',
@@ -1912,7 +1997,7 @@ const WorkoutTracker = () => {
                 onClick={() => {
                   if (window.confirm('Reset template to default? This will clear all your custom workout days and exercises.')) {
                     const newBlocks = [...blocks];
-                    newBlocks[currentBlock - 1] = {
+                    newBlocks[0] = {
                       id: 1,
                       name: 'Block A - Hypertrophy Focus',
                       weeks: 4,
@@ -1936,28 +2021,89 @@ const WorkoutTracker = () => {
         {/* Calendar View */}
         {view === 'calendar' && (
           <div className="space-y-6">
-            <div className="flex items-center justify-between">
-              <div>
-                <h2 className="text-2xl font-bold text-gray-100">Week {currentWeek}</h2>
-                <p className="text-gray-400">{blocks[currentBlock - 1]?.name}</p>
+            <div className="space-y-3">
+              {/* Block navigation row */}
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-1">
+                  <button
+                    onClick={() => { setCurrentBlock(prev => Math.max(1, prev - 1)); setCurrentWeek(1); }}
+                    disabled={currentBlock === 1}
+                    className="p-1.5 rounded-lg hover:bg-gray-700 text-gray-300 disabled:opacity-30 disabled:cursor-not-allowed"
+                    title="Previous training block"
+                  >
+                    <ChevronLeft className="w-4 h-4" />
+                  </button>
+                  <div className="text-center px-1">
+                    <span className="text-sm font-semibold text-gray-100">
+                      {blockMetadata[currentBlock]?.name || `Block ${currentBlock}`}
+                    </span>
+                    {blockMetadata[currentBlock]?.startDate && (
+                      <span className="text-xs text-gray-500 ml-2">
+                        · started {formatDate(blockMetadata[currentBlock].startDate)}
+                      </span>
+                    )}
+                  </div>
+                  <button
+                    onClick={() => { setCurrentBlock(prev => Math.min(highestBlockWithData, prev + 1)); setCurrentWeek(1); }}
+                    disabled={currentBlock >= highestBlockWithData}
+                    className="p-1.5 rounded-lg hover:bg-gray-700 text-gray-300 disabled:opacity-30 disabled:cursor-not-allowed"
+                    title="Next training block"
+                  >
+                    <ChevronRight className="w-4 h-4" />
+                  </button>
+                </div>
+                {isViewingCurrentBlock && (
+                  <button
+                    onClick={() => { setNewBlockName(''); setShowNewBlockModal(true); }}
+                    className="px-3 py-1.5 bg-emerald-700 hover:bg-emerald-600 text-white rounded-lg text-xs font-medium flex items-center gap-1"
+                    title="Start a new training cycle"
+                  >
+                    <Plus className="w-3.5 h-3.5" />
+                    New Block
+                  </button>
+                )}
               </div>
-              <div className="flex gap-2">
-                <button
-                  onClick={() => setCurrentWeek(Math.max(1, currentWeek - 1))}
-                  className="p-2 rounded-lg hover:bg-gray-700 text-gray-300 disabled:opacity-50"
-                  disabled={currentWeek === 1}
-                >
-                  <ChevronLeft className="w-5 h-5" />
-                </button>
-                <span className="px-4 py-2 bg-gray-700 rounded-lg text-gray-300 font-medium">
-                  Week {currentWeek}
-                </span>
-                <button
-                  onClick={() => setCurrentWeek(currentWeek + 1)}
-                  className="p-2 rounded-lg hover:bg-gray-700 text-gray-300"
-                >
-                  <ChevronRight className="w-5 h-5" />
-                </button>
+
+              {/* Historical block banner */}
+              {!isViewingCurrentBlock && (
+                <div className="flex items-center justify-between px-3 py-2 bg-amber-950/30 border border-amber-800/40 rounded-lg">
+                  <span className="text-xs text-amber-400 flex items-center gap-1">
+                    <History className="w-3 h-3" />
+                    Viewing past block — read only
+                  </span>
+                  <button
+                    onClick={() => { setCurrentBlock(highestBlockWithData); setCurrentWeek(1); }}
+                    className="text-xs text-amber-300 hover:text-amber-100 underline"
+                  >
+                    Return to current
+                  </button>
+                </div>
+              )}
+
+              {/* Week navigation row */}
+              <div className="flex items-center justify-between">
+                <div>
+                  <h2 className="text-2xl font-bold text-gray-100">Block {currentBlock} · Week {currentWeek}</h2>
+                </div>
+                <div className="flex gap-2">
+                  <button
+                    onClick={() => setCurrentWeek(Math.max(1, currentWeek - 1))}
+                    className="p-2 rounded-lg hover:bg-gray-700 text-gray-300 disabled:opacity-50"
+                    disabled={currentWeek === 1}
+                  >
+                    <ChevronLeft className="w-5 h-5" />
+                  </button>
+                  <span className="px-4 py-2 bg-gray-700 rounded-lg text-gray-300 font-medium">
+                    Week {currentWeek}
+                  </span>
+                  <button
+                    onClick={() => setCurrentWeek(currentWeek + 1)}
+                    disabled={!isViewingCurrentBlock && currentWeek >= (blocks[0]?.weeks || 52)}
+                    className="p-2 rounded-lg hover:bg-gray-700 text-gray-300 disabled:opacity-30"
+                  >
+                    <ChevronRight className="w-5 h-5" />
+                  </button>
+                </div>
               </div>
             </div>
 
@@ -1996,6 +2142,9 @@ const WorkoutTracker = () => {
                   <div
                     key={day}
                     onClick={() => {
+                      // Don't open empty days in past blocks
+                      if (!isViewingCurrentBlock && !workoutLogs[logKey]) return;
+
                       setSelectedDay(day);
                       const existingLog = workoutLogs[logKey];
 
@@ -2047,10 +2196,12 @@ const WorkoutTracker = () => {
                       }
                       setView('log');
                     }}
-                    className={`p-4 rounded-lg border cursor-pointer transition-all ${
-                      log 
-                        ? 'border-emerald-500 bg-emerald-950/30 hover:bg-emerald-950/50' 
-                        : 'border-gray-700 bg-gray-800 hover:bg-gray-750 hover:border-gray-600'
+                    className={`p-4 rounded-lg border transition-all ${
+                      log
+                        ? 'border-emerald-500 bg-emerald-950/30 hover:bg-emerald-950/50 cursor-pointer'
+                        : isViewingCurrentBlock
+                          ? 'border-gray-700 bg-gray-800 hover:bg-gray-750 hover:border-gray-600 cursor-pointer'
+                          : 'border-gray-700 bg-gray-800 opacity-40 cursor-default'
                     }`}
                   >
                     <div className="flex items-center justify-between">
@@ -2853,7 +3004,14 @@ const WorkoutTracker = () => {
               </button>
             </div>
 
-            <button
+            {!isViewingCurrentBlock && (
+              <div className="flex items-center gap-2 p-3 bg-amber-950/30 border border-amber-800/40 rounded-lg text-xs text-amber-400">
+                <History className="w-3.5 h-3.5 flex-shrink-0" />
+                Viewing past block — this workout is read only
+              </div>
+            )}
+
+            {isViewingCurrentBlock && <button
               onClick={() => {
                 const logKey = `block${currentBlock}-week${currentWeek}-${selectedDay}`;
                 const weekKey = `block${currentBlock}-week${currentWeek}`;
@@ -2893,7 +3051,7 @@ const WorkoutTracker = () => {
             >
               <Save className="w-5 h-5" />
               Save Workout
-            </button>
+            </button>}
           </div>
         )}
       </div>
@@ -3032,6 +3190,64 @@ const WorkoutTracker = () => {
             >
               Awesome! Continue
             </button>
+          </div>
+        </div>
+      )}
+
+      {/* New Block Modal */}
+      {showNewBlockModal && (
+        <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-50 p-4">
+          <div className="bg-gray-800 border border-gray-700 rounded-xl p-6 max-w-sm w-full">
+            <div className="flex justify-between items-center mb-2">
+              <h2 className="text-xl font-bold text-gray-100">Start Block {currentBlock + 1}?</h2>
+              <button onClick={() => setShowNewBlockModal(false)} className="text-gray-400 hover:text-gray-200">
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+            <p className="text-sm text-gray-400 mb-4">
+              This starts a new training cycle. Your current workout logs and all personal records are saved and will remain browseable. You&apos;ll return to Week 1 with the same exercise template.
+            </p>
+            <div className="mb-4">
+              <label className="text-xs text-gray-400 block mb-1">
+                Name for Block {currentBlock + 1} (optional)
+              </label>
+              <input
+                type="text"
+                placeholder={`Block ${currentBlock + 1}`}
+                value={newBlockName}
+                onChange={(e) => setNewBlockName(e.target.value)}
+                className="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded-lg text-gray-100 text-sm"
+                autoFocus
+              />
+            </div>
+            <div className="flex gap-3">
+              <button
+                onClick={() => setShowNewBlockModal(false)}
+                className="flex-1 py-2 bg-gray-700 hover:bg-gray-600 text-gray-300 rounded-lg text-sm"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={() => {
+                  const newBlockNum = currentBlock + 1;
+                  const today = new Date().toISOString().split('T')[0];
+                  setBlockMetadata({
+                    ...blockMetadata,
+                    [newBlockNum]: {
+                      name: newBlockName.trim() || `Block ${newBlockNum}`,
+                      startDate: today
+                    }
+                  });
+                  setCurrentBlock(newBlockNum);
+                  setCurrentWeek(1);
+                  setShowNewBlockModal(false);
+                  setNewBlockName('');
+                }}
+                className="flex-1 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-sm font-medium"
+              >
+                Start Block {currentBlock + 1}
+              </button>
+            </div>
           </div>
         </div>
       )}
