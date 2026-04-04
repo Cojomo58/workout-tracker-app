@@ -73,6 +73,15 @@ const WorkoutTracker = () => {
   const [newPRs, setNewPRs] = useState([]);
   const [showPRModal, setShowPRModal] = useState(false);
 
+  // Training Maxes State
+  const [trainingMaxes, setTrainingMaxes] = useState({});
+  const [showTMModal, setShowTMModal] = useState(false);
+  const [tmModalExercise, setTmModalExercise] = useState('');
+  const [tmModalCalcWeight, setTmModalCalcWeight] = useState('');
+  const [tmModalCalcReps, setTmModalCalcReps] = useState('');
+  const [tmModalTrueRM, setTmModalTrueRM] = useState('');
+  const [tmModalPercent, setTmModalPercent] = useState('90');
+
   // Charts State
   const [chartType, setChartType] = useState('weight');
 
@@ -283,6 +292,9 @@ const WorkoutTracker = () => {
       } else if (savedPRs) {
         setPersonalRecords(JSON.parse(savedPRs));
       }
+
+      const savedTM = localStorage.getItem('training-maxes');
+      if (savedTM) setTrainingMaxes(JSON.parse(savedTM));
     } catch (error) {
       console.log('Error loading data:', error);
       console.error('Error loading saved data');
@@ -318,6 +330,10 @@ const WorkoutTracker = () => {
       setPersonalRecords(data.personal_records || {});
     }
 
+    if (data.training_maxes && Object.keys(data.training_maxes).length > 0) {
+      setTrainingMaxes(data.training_maxes);
+    }
+
     // Cache in localStorage
     try {
       localStorage.setItem('workout-logs', JSON.stringify(parsedLogs));
@@ -326,6 +342,7 @@ const WorkoutTracker = () => {
       localStorage.setItem('personal-records', JSON.stringify(data.personal_records || {}));
       if (data.current_block) localStorage.setItem('current-block', JSON.stringify(data.current_block));
       if (data.block_metadata) localStorage.setItem('block-metadata', JSON.stringify(data.block_metadata));
+      if (data.training_maxes) localStorage.setItem('training-maxes', JSON.stringify(data.training_maxes));
     } catch (e) {
       console.log('Error caching to localStorage:', e);
     }
@@ -421,6 +438,16 @@ const WorkoutTracker = () => {
   React.useEffect(() => {
     if (dataLoaded) {
       try {
+        localStorage.setItem('training-maxes', JSON.stringify(trainingMaxes));
+      } catch (error) {
+        console.error('Error saving training maxes:', error);
+      }
+    }
+  }, [trainingMaxes, dataLoaded]);
+
+  React.useEffect(() => {
+    if (dataLoaded) {
+      try {
         localStorage.setItem('current-block', JSON.stringify(currentBlock));
       } catch (error) {
         console.error('Error saving current block:', error);
@@ -457,7 +484,8 @@ const WorkoutTracker = () => {
             blocks: blocks,
             personal_records: personalRecords,
             current_block: currentBlock,
-            block_metadata: blockMetadata
+            block_metadata: blockMetadata,
+            training_maxes: trainingMaxes
           });
 
         if (error) throw error;
@@ -465,7 +493,7 @@ const WorkoutTracker = () => {
         console.error('Error saving to Supabase:', error);
       }
     }, 1000);
-  }, [user, workoutLogs, weeklyMetrics, blocks, personalRecords, currentBlock, blockMetadata, dataLoaded]);
+  }, [user, workoutLogs, weeklyMetrics, blocks, personalRecords, currentBlock, blockMetadata, trainingMaxes, dataLoaded]);
 
   // Trigger Supabase sync when data changes
   React.useEffect(() => {
@@ -520,6 +548,30 @@ const WorkoutTracker = () => {
     if (!weight || !reps || reps < 1) return 0;
     // Epley formula: 1RM = weight × (1 + reps/30)
     return Math.round(parseFloat(weight) * (1 + parseFloat(reps) / 30));
+  };
+
+  // Training Max utility functions
+  const roundToNearest2_5 = (w) => Math.round(w / 2.5) * 2.5;
+
+  const deriveTrainingMax = (true1RM, pct) =>
+    roundToNearest2_5(parseFloat(true1RM) * parseFloat(pct) / 100);
+
+  const getPercentageWeight = (exerciseName, percentage) => {
+    const tm = trainingMaxes[exerciseName];
+    if (!tm || !percentage) return null;
+    return roundToNearest2_5(tm.trainingMax * percentage / 100);
+  };
+
+  const saveTrainingMax = (exerciseName, true1RM, pct = 90) => {
+    setTrainingMaxes(prev => ({
+      ...prev,
+      [exerciseName]: {
+        true1RM: parseFloat(true1RM),
+        trainingMaxPercent: parseFloat(pct),
+        trainingMax: deriveTrainingMax(true1RM, pct),
+        lastUpdated: new Date().toISOString().split('T')[0]
+      }
+    }));
   };
 
   const checkForPRs = (exerciseName, sets, logDate, exerciseType = 'strength') => {
@@ -948,11 +1000,20 @@ const WorkoutTracker = () => {
     reader.onload = (e) => {
       try {
         const data = JSON.parse(e.target.result);
+        if (!data || typeof data !== 'object') {
+          alert('Invalid backup file: not a valid JSON object.');
+          return;
+        }
+        if (data.workoutLogs !== undefined && typeof data.workoutLogs !== 'object') {
+          alert('Invalid backup file: workoutLogs has unexpected format.');
+          return;
+        }
         if (data.workoutLogs) setWorkoutLogs(data.workoutLogs);
         if (data.weeklyMetrics) setWeeklyMetrics(data.weeklyMetrics);
         if (data.blocks) setBlocks(data.blocks);
         if (data.currentBlock) setCurrentBlock(data.currentBlock);
         if (data.blockMetadata) setBlockMetadata(data.blockMetadata);
+        if (data.trainingMaxes && typeof data.trainingMaxes === 'object') setTrainingMaxes(data.trainingMaxes);
         if (data.personalRecords) {
           setPersonalRecords(data.personalRecords);
         } else if (data.workoutLogs) {
@@ -961,7 +1022,6 @@ const WorkoutTracker = () => {
           setPersonalRecords(migratedPRs);
         }
         alert('Data imported successfully!');
-        setShowExportImport(false);
       } catch (error) {
         alert('Error importing data: ' + error.message);
       }
@@ -1292,6 +1352,61 @@ const WorkoutTracker = () => {
               );
             })()}
 
+            {/* Training Maxes Panel */}
+            <div className="bg-gray-800 p-4 rounded-lg border border-gray-700">
+              <div className="flex items-center justify-between mb-3">
+                <h3 className="font-semibold text-gray-100 flex items-center gap-2">
+                  <Dumbbell className="w-5 h-5 text-purple-400" />
+                  Training Maxes
+                </h3>
+                <button
+                  onClick={() => {
+                    setTmModalExercise('');
+                    setTmModalTrueRM('');
+                    setTmModalPercent('90');
+                    setTmModalCalcWeight('');
+                    setTmModalCalcReps('');
+                    setShowTMModal(true);
+                  }}
+                  className="text-xs px-3 py-1 bg-purple-700/40 hover:bg-purple-700/60 text-purple-300 rounded border border-purple-700/50 flex items-center gap-1"
+                >
+                  <Plus className="w-3 h-3" /> Add
+                </button>
+              </div>
+              {Object.keys(trainingMaxes).length === 0 ? (
+                <p className="text-gray-400 text-sm">No training maxes set. Select an exercise with an Est. 1RM and click "Set as Training Max".</p>
+              ) : (
+                <div className="space-y-2">
+                  {Object.entries(trainingMaxes).map(([name, tm]) => (
+                    <div key={name} className="flex items-center justify-between p-3 bg-gray-900/50 rounded-lg border border-gray-700">
+                      <div>
+                        <p className="font-medium text-gray-100 text-sm">{name}</p>
+                        <p className="text-xs text-gray-400 mt-0.5">
+                          1RM: {tm.true1RM} lb · {tm.trainingMaxPercent}% →{' '}
+                          <span className="text-purple-300 font-medium">TM: {tm.trainingMax} lb</span>
+                        </p>
+                        <p className="text-xs text-gray-500">Updated {tm.lastUpdated}</p>
+                      </div>
+                      <button
+                        onClick={() => {
+                          setTmModalExercise(name);
+                          setTmModalTrueRM(String(tm.true1RM));
+                          setTmModalPercent(String(tm.trainingMaxPercent));
+                          setTmModalCalcWeight('');
+                          setTmModalCalcReps('');
+                          setShowTMModal(true);
+                        }}
+                        className="p-2 bg-gray-700 hover:bg-gray-600 text-gray-300 rounded"
+                        title="Edit training max"
+                      >
+                        <Edit3 className="w-4 h-4" />
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+
             <div className="bg-gray-800 p-4 rounded-lg border border-gray-700">
               <h3 className="font-semibold text-gray-100 mb-3 flex items-center gap-2">
                 <History className="w-5 h-5" />
@@ -1572,6 +1687,19 @@ const WorkoutTracker = () => {
                             {personalRecords[selectedExerciseHistory].estimated1RM.value} lb
                           </div>
                           <div className="text-xs text-gray-500">Epley formula</div>
+                          <button
+                            onClick={() => {
+                              setTmModalExercise(selectedExerciseHistory);
+                              setTmModalTrueRM(String(personalRecords[selectedExerciseHistory].estimated1RM.value));
+                              setTmModalPercent(String(trainingMaxes[selectedExerciseHistory]?.trainingMaxPercent || 90));
+                              setTmModalCalcWeight('');
+                              setTmModalCalcReps('');
+                              setShowTMModal(true);
+                            }}
+                            className="mt-2 w-full text-xs py-1 px-2 bg-purple-700/40 hover:bg-purple-700/60 text-purple-300 rounded border border-purple-700/50"
+                          >
+                            {trainingMaxes[selectedExerciseHistory] ? 'Update Training Max' : 'Set as Training Max'}
+                          </button>
                         </div>
                       )}
                       {/* Bodyweight PRs */}
@@ -1899,6 +2027,7 @@ const WorkoutTracker = () => {
                           />
                           <button
                             onClick={() => {
+                              if (!window.confirm(`Remove "${exercise.name || 'this exercise'}" from the template?`)) return;
                               const newBlocks = [...blocks];
                               newBlocks[0].template[dayKey].exercises = dayData.exercises.filter((_, i) => i !== exIdx);
                               setBlocks(newBlocks);
@@ -1908,7 +2037,7 @@ const WorkoutTracker = () => {
                             <X className="w-4 h-4" />
                           </button>
                         </div>
-                        <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
+                        <div className="grid grid-cols-2 md:grid-cols-5 gap-2">
                           <div>
                             <label className="text-xs text-gray-500">Sets</label>
                             <input
@@ -1964,6 +2093,32 @@ const WorkoutTracker = () => {
                               className="w-full px-2 py-1 bg-gray-700 border border-gray-600 rounded text-gray-100 text-sm"
                               placeholder="2-3 min"
                             />
+                          </div>
+                          <div>
+                            <label className="text-xs text-gray-500 flex items-center gap-1" title="Percentage of Training Max — auto-fills weight when you open this workout">% of TM</label>
+                            <input
+                              type="number"
+                              min="50"
+                              max="110"
+                              placeholder="—"
+                              value={exercise.percentage || ''}
+                              onChange={(e) => {
+                                const newBlocks = [...blocks];
+                                const val = e.target.value;
+                                newBlocks[0].template[dayKey].exercises[exIdx].percentage =
+                                  val ? parseInt(val) : undefined;
+                                setBlocks(newBlocks);
+                              }}
+                              className="w-full px-2 py-1 bg-gray-700 border border-gray-600 rounded text-gray-100 text-sm"
+                            />
+                            {exercise.percentage && trainingMaxes[exercise.name] && (
+                              <p className="text-xs text-purple-400 mt-1">
+                                = {getPercentageWeight(exercise.name, exercise.percentage)} lb
+                              </p>
+                            )}
+                            {exercise.percentage && !trainingMaxes[exercise.name] && (
+                              <p className="text-xs text-gray-500 mt-1">No TM set</p>
+                            )}
                           </div>
                         </div>
                       </div>
@@ -2163,11 +2318,17 @@ const WorkoutTracker = () => {
                         const prevWeekLog = prevWeekKey ? workoutLogs[prevWeekKey] : null;
 
                         if (prevWeekLog && prevWeekLog.exercises && prevWeekLog.exercises.length > 0) {
+                          // Find matching template exercise to pull templateTarget/templatePercentage
+                          const templateExercises = workout?.exercises || [];
                           setExercises(prevWeekLog.exercises.map(ex => {
                             const exType = ex.type || 'strength';
+                            const tmplEx = templateExercises.find(t => t.name === ex.name);
                             return {
                               name: ex.name,
                               type: exType,
+                              technique: ex.technique,
+                              templateTarget: tmplEx ? `${tmplEx.sets}×${tmplEx.reps}` : null,
+                              templatePercentage: tmplEx?.percentage || null,
                               sets: ex.sets.map(s =>
                                 exType === 'bodyweight'
                                   ? { reps: s.reps || '', holdTime: s.holdTime || '' }
@@ -2182,15 +2343,25 @@ const WorkoutTracker = () => {
                           }));
                           setPrefilled(true);
                         } else {
-                          setExercises(workout?.exercises.map(ex => ({
-                            name: ex.name,
-                            technique: ex.technique,
-                            sets: Array(parseInt(ex.sets) || 3).fill(null).map(() => ({
-                              weight: '',
-                              reps: ''
-                            })),
-                            notes: ''
-                          })) || []);
+                          setExercises(workout?.exercises.map(ex => {
+                            const exType = ex.type || 'strength';
+                            const pctWeight = (ex.percentage && exType === 'strength')
+                              ? getPercentageWeight(ex.name, ex.percentage)
+                              : null;
+                            return {
+                              name: ex.name,
+                              type: exType,
+                              technique: ex.technique,
+                              templateTarget: (ex.sets && ex.reps) ? `${ex.sets}×${ex.reps}` : null,
+                              templatePercentage: ex.percentage || null,
+                              sets: Array(parseInt(ex.sets) || 3).fill(null).map(() => ({
+                                weight: pctWeight ? String(pctWeight) : '',
+                                reps: '',
+                                weightSource: pctWeight ? 'tm-pct' : 'manual'
+                              })),
+                              notes: ''
+                            };
+                          }) || []);
                           setPrefilled(false);
                         }
                       }
@@ -2563,6 +2734,17 @@ const WorkoutTracker = () => {
                       </div>
                     )}
 
+                    {/* Template target hint */}
+                    {exercise.templateTarget && (
+                      <div className="flex items-center gap-2 mb-2">
+                        <span className="text-xs text-gray-500">Target:</span>
+                        <span className="text-xs text-emerald-400 font-medium">{exercise.templateTarget}</span>
+                        {exercise.templatePercentage && trainingMaxes[exercise.name] && (
+                          <span className="text-xs text-purple-400">@ {exercise.templatePercentage}% TM ({trainingMaxes[exercise.name].trainingMax} lb)</span>
+                        )}
+                      </div>
+                    )}
+
                     <div className="space-y-2">
                       {exercise.sets.map((set, setIdx) => {
                         const exerciseType = exercise.type || 'strength';
@@ -2575,6 +2757,7 @@ const WorkoutTracker = () => {
                               <span className="text-sm font-medium text-gray-400 w-16">Entry {setIdx + 1}</span>
                               <input
                                 type="text"
+                                inputMode="decimal"
                                 placeholder="Distance"
                                 value={set.distance || ''}
                                 onChange={(e) => {
@@ -2638,6 +2821,7 @@ const WorkoutTracker = () => {
                               <span className="text-sm font-medium text-gray-400 w-12">Set {setIdx + 1}</span>
                               <input
                                 type="text"
+                                inputMode="decimal"
                                 placeholder="Reps"
                                 value={set.reps || ''}
                                 onChange={(e) => {
@@ -2651,6 +2835,7 @@ const WorkoutTracker = () => {
                               <span className="text-gray-400">reps</span>
                               <input
                                 type="text"
+                                inputMode="decimal"
                                 placeholder="Seconds"
                                 value={set.holdTime || ''}
                                 onChange={(e) => {
@@ -2686,6 +2871,7 @@ const WorkoutTracker = () => {
                               <span className="text-sm font-medium text-gray-400 w-12">Set {setIdx + 1}</span>
                               <input
                                 type="text"
+                                inputMode="decimal"
                                 placeholder="Rounds"
                                 value={set.rounds || ''}
                                 onChange={(e) => {
@@ -2699,6 +2885,7 @@ const WorkoutTracker = () => {
                               <span className="text-gray-400">rounds @</span>
                               <input
                                 type="text"
+                                inputMode="decimal"
                                 placeholder="20"
                                 value={set.workSeconds || '20'}
                                 onChange={(e) => {
@@ -2712,6 +2899,7 @@ const WorkoutTracker = () => {
                               <span className="text-gray-400">s /</span>
                               <input
                                 type="text"
+                                inputMode="decimal"
                                 placeholder="10"
                                 value={set.restSeconds || '10'}
                                 onChange={(e) => {
@@ -2725,6 +2913,7 @@ const WorkoutTracker = () => {
                               <span className="text-gray-400">s</span>
                               <input
                                 type="text"
+                                inputMode="decimal"
                                 placeholder="Cal"
                                 value={set.calories || ''}
                                 onChange={(e) => {
@@ -2763,13 +2952,23 @@ const WorkoutTracker = () => {
                         return (
                           <div key={setIdx} className="flex gap-2 items-center flex-wrap">
                             <span className="text-sm font-medium text-gray-400 w-12">Set {setIdx + 1}</span>
+                            {set.weightSource === 'tm-pct' && exercise.templatePercentage && (
+                              <span
+                                title={`${exercise.templatePercentage}% of Training Max`}
+                                className="text-xs bg-purple-900/50 text-purple-300 border border-purple-700/50 px-1.5 py-0.5 rounded"
+                              >
+                                {exercise.templatePercentage}% TM
+                              </span>
+                            )}
                             <input
                               type="text"
+                              inputMode="decimal"
                               placeholder="Weight"
                               value={set.weight || ''}
                               onChange={(e) => {
                                 const newExercises = [...exercises];
                                 newExercises[exIdx].sets[setIdx].weight = e.target.value;
+                                newExercises[exIdx].sets[setIdx].weightSource = 'manual';
                                 setExercises(newExercises);
                               }}
                               className="px-3 py-2 bg-gray-700 border border-gray-600 rounded-lg w-24 text-gray-100"
@@ -2777,6 +2976,7 @@ const WorkoutTracker = () => {
                             <span className="text-gray-400">lb ×</span>
                             <input
                               type="text"
+                              inputMode="decimal"
                               placeholder="Reps"
                               value={set.reps || ''}
                               onChange={(e) => {
@@ -2973,17 +3173,38 @@ const WorkoutTracker = () => {
                       return null;
                     })()}
 
-                    <textarea
-                      placeholder="Notes"
-                      value={exercise.notes || ''}
-                      onChange={(e) => {
-                        const newExercises = [...exercises];
-                        newExercises[exIdx].notes = e.target.value;
-                        setExercises(newExercises);
-                      }}
-                      className="w-full mt-3 px-3 py-2 bg-gray-700 border border-gray-600 rounded-lg text-sm text-gray-100"
-                      rows={2}
-                    />
+                    {exercise.notes || exercise._notesOpen ? (
+                      <textarea
+                        placeholder="Notes"
+                        autoFocus={exercise._notesOpen && !exercise.notes}
+                        value={exercise.notes || ''}
+                        onChange={(e) => {
+                          const newExercises = [...exercises];
+                          newExercises[exIdx].notes = e.target.value;
+                          setExercises(newExercises);
+                        }}
+                        onBlur={() => {
+                          if (!exercise.notes) {
+                            const newExercises = [...exercises];
+                            newExercises[exIdx]._notesOpen = false;
+                            setExercises(newExercises);
+                          }
+                        }}
+                        className="w-full mt-3 px-3 py-2 bg-gray-700 border border-gray-600 rounded-lg text-sm text-gray-100"
+                        rows={2}
+                      />
+                    ) : (
+                      <button
+                        onClick={() => {
+                          const newExercises = [...exercises];
+                          newExercises[exIdx]._notesOpen = true;
+                          setExercises(newExercises);
+                        }}
+                        className="mt-3 text-xs text-gray-500 hover:text-gray-300 transition-colors"
+                      >
+                        + Add note
+                      </button>
+                    )}
                   </div>
                 );
               })}
@@ -3027,13 +3248,16 @@ const WorkoutTracker = () => {
                   updatePRs(exercise.name, exercise.sets, logDate, logKey, exerciseType);
                 });
 
-                // Save workout log
+                // Save workout log — strip UI-only metadata before persisting
+                const exercisesToSave = exercises.map(({ _notesOpen, templateTarget, templatePercentage, ...ex }) => ({
+                  ...ex,
+                  sets: ex.sets.map(({ weightSource, ...set }) => set)
+                }));
                 setWorkoutLogs({
                   ...workoutLogs,
                   [logKey]: {
                     date: logDate,
-
-                    exercises: exercises,
+                    exercises: exercisesToSave,
                     prsHit: allPRs.length
                   }
                 });
@@ -3109,6 +3333,19 @@ const WorkoutTracker = () => {
                           {pr.value} lb (from {pr.weight} lb × {pr.reps} reps)
                           {pr.previous > 0 && ` (previous: ${pr.previous} lb)`}
                         </p>
+                        <button
+                          onClick={() => {
+                            setTmModalExercise(pr.exerciseName);
+                            setTmModalTrueRM(String(pr.value));
+                            setTmModalPercent(String(trainingMaxes[pr.exerciseName]?.trainingMaxPercent || 90));
+                            setTmModalCalcWeight('');
+                            setTmModalCalcReps('');
+                            setShowTMModal(true);
+                          }}
+                          className="mt-2 text-xs text-purple-400 hover:text-purple-300 underline"
+                        >
+                          Use as Training Max
+                        </button>
                       </>
                     )}
                     {pr.type === 'maxDistance' && (
@@ -3246,6 +3483,134 @@ const WorkoutTracker = () => {
                 className="flex-1 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-sm font-medium"
               >
                 Start Block {currentBlock + 1}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Training Max Modal */}
+      {showTMModal && (
+        <div className="fixed inset-0 bg-black/80 flex items-center justify-center z-[60] p-4">
+          <div className="bg-gray-800 border border-gray-700 rounded-xl p-6 max-w-md w-full">
+            <div className="flex justify-between items-center mb-4">
+              <h2 className="text-lg font-bold text-gray-100 flex items-center gap-2">
+                <Dumbbell className="w-5 h-5 text-purple-400" />
+                {tmModalExercise ? `Training Max — ${tmModalExercise}` : 'Set Training Max'}
+              </h2>
+              <button onClick={() => setShowTMModal(false)} className="text-gray-400 hover:text-gray-200">
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+            {!tmModalExercise && (
+              <div className="mb-4">
+                <label className="text-xs text-gray-400 block mb-1">Exercise Name</label>
+                <input
+                  type="text"
+                  placeholder="e.g. Bench Press"
+                  value={tmModalExercise}
+                  onChange={(e) => setTmModalExercise(e.target.value)}
+                  className="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded-lg text-gray-100"
+                />
+              </div>
+            )}
+
+            {/* Calculator */}
+            <div className="bg-gray-900/50 rounded-lg p-4 mb-4 border border-gray-700">
+              <p className="text-xs text-gray-400 uppercase tracking-wide mb-3">Calculate from a recent set</p>
+              <div className="flex gap-3 items-end">
+                <div className="flex-1">
+                  <label className="text-xs text-gray-500 block mb-1">Weight (lb)</label>
+                  <input
+                    type="text"
+                    inputMode="decimal"
+                    placeholder="185"
+                    value={tmModalCalcWeight}
+                    onChange={(e) => setTmModalCalcWeight(e.target.value)}
+                    className="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded-lg text-gray-100 text-sm"
+                  />
+                </div>
+                <div className="flex-1">
+                  <label className="text-xs text-gray-500 block mb-1">Reps</label>
+                  <input
+                    type="text"
+                    inputMode="decimal"
+                    placeholder="5"
+                    value={tmModalCalcReps}
+                    onChange={(e) => setTmModalCalcReps(e.target.value)}
+                    className="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded-lg text-gray-100 text-sm"
+                  />
+                </div>
+                <div className="text-right">
+                  {tmModalCalcWeight && tmModalCalcReps && parseInt(tmModalCalcReps) > 0 && (
+                    <div className="text-purple-300 text-sm font-semibold mb-1">
+                      {calculateEstimated1RM(tmModalCalcWeight, tmModalCalcReps)} lb
+                    </div>
+                  )}
+                  <button
+                    disabled={!tmModalCalcWeight || !tmModalCalcReps || parseInt(tmModalCalcReps) <= 0}
+                    onClick={() => setTmModalTrueRM(String(calculateEstimated1RM(tmModalCalcWeight, tmModalCalcReps)))}
+                    className="text-xs px-3 py-2 bg-purple-700/40 hover:bg-purple-700/60 disabled:opacity-40 disabled:cursor-not-allowed text-purple-300 rounded border border-purple-700/50 whitespace-nowrap"
+                  >
+                    Use as 1RM
+                  </button>
+                </div>
+              </div>
+            </div>
+
+            {/* Direct entry */}
+            <div className="space-y-3 mb-5">
+              <div>
+                <label className="text-xs text-gray-400 block mb-1">True 1RM (lb)</label>
+                <input
+                  type="text"
+                  inputMode="decimal"
+                  placeholder="225"
+                  value={tmModalTrueRM}
+                  onChange={(e) => setTmModalTrueRM(e.target.value)}
+                  className="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded-lg text-gray-100"
+                />
+              </div>
+              <div>
+                <label className="text-xs text-gray-400 block mb-1">Training Max % <span className="text-gray-500">(typically 85–90%)</span></label>
+                <input
+                  type="number"
+                  min="70"
+                  max="100"
+                  value={tmModalPercent}
+                  onChange={(e) => setTmModalPercent(e.target.value)}
+                  className="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded-lg text-gray-100"
+                />
+              </div>
+              {tmModalTrueRM && parseFloat(tmModalTrueRM) > 0 && (
+                <div className="bg-purple-900/20 border border-purple-700/40 rounded-lg p-3 text-center">
+                  <p className="text-xs text-gray-400 mb-1">Training Max</p>
+                  <p className="text-2xl font-bold text-purple-300">
+                    {deriveTrainingMax(tmModalTrueRM, tmModalPercent)} lb
+                  </p>
+                  <p className="text-xs text-gray-500 mt-1">
+                    {tmModalPercent}% of {tmModalTrueRM} lb
+                  </p>
+                </div>
+              )}
+            </div>
+
+            <div className="flex gap-3">
+              <button
+                onClick={() => setShowTMModal(false)}
+                className="flex-1 px-4 py-2 bg-gray-700 hover:bg-gray-600 text-gray-300 rounded-lg text-sm"
+              >
+                Cancel
+              </button>
+              <button
+                disabled={!tmModalTrueRM || parseFloat(tmModalTrueRM) <= 0}
+                onClick={() => {
+                  saveTrainingMax(tmModalExercise, tmModalTrueRM, tmModalPercent);
+                  setShowTMModal(false);
+                }}
+                className="flex-1 px-4 py-2 bg-purple-600 hover:bg-purple-500 disabled:opacity-40 disabled:cursor-not-allowed text-white rounded-lg text-sm font-medium"
+              >
+                Save Training Max
               </button>
             </div>
           </div>
