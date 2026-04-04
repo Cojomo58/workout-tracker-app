@@ -100,6 +100,10 @@ const WorkoutTracker = () => {
   const [authError, setAuthError] = useState('');
   // Weekly scheme editor — tracks which exercise panel is open: "${dayKey}-${exIdx}"
   const [openWeeklyScheme, setOpenWeeklyScheme] = useState(null);
+  // Manage exercises (rename / delete across all logs + PRs)
+  const [exRenameTarget, setExRenameTarget] = useState(null); // name being renamed
+  const [exRenameValue, setExRenameValue] = useState('');
+  const [exFilter, setExFilter] = useState('');
   const saveTimeoutRef = useRef(null);
 
   // Migrate PRs from historical workout data
@@ -654,6 +658,69 @@ const WorkoutTracker = () => {
     const newBlocks = [...blocks];
     delete newBlocks[0].template[dayKey].exercises[exIdx].weeklyScheme;
     setBlocks(newBlocks);
+  };
+
+  const renameExercise = (oldName, newName) => {
+    if (!newName.trim() || newName.trim() === oldName) return;
+    const n = newName.trim();
+    // Rename in all workout logs
+    setWorkoutLogs(prev => {
+      const updated = {};
+      Object.entries(prev).forEach(([key, log]) => {
+        updated[key] = {
+          ...log,
+          exercises: log.exercises?.map(ex =>
+            ex.name === oldName ? { ...ex, name: n } : ex
+          ) || []
+        };
+      });
+      return updated;
+    });
+    // Rename in personal records
+    setPersonalRecords(prev => {
+      if (!prev[oldName]) return prev;
+      const updated = { ...prev };
+      updated[n] = updated[oldName];
+      delete updated[oldName];
+      return updated;
+    });
+    // Rename in training maxes
+    setTrainingMaxes(prev => {
+      if (!prev[oldName]) return prev;
+      const updated = { ...prev };
+      updated[n] = updated[oldName];
+      delete updated[oldName];
+      return updated;
+    });
+    // Rename in template exercises
+    setBlocks(prev => {
+      const newBlocks = JSON.parse(JSON.stringify(prev));
+      Object.values(newBlocks[0]?.template || {}).forEach(day => {
+        day.exercises?.forEach(ex => { if (ex.name === oldName) ex.name = n; });
+      });
+      return newBlocks;
+    });
+  };
+
+  const deleteExercise = (name) => {
+    setWorkoutLogs(prev => {
+      const updated = {};
+      Object.entries(prev).forEach(([key, log]) => {
+        const filtered = log.exercises?.filter(ex => ex.name !== name) || [];
+        updated[key] = { ...log, exercises: filtered };
+      });
+      return updated;
+    });
+    setPersonalRecords(prev => {
+      const updated = { ...prev };
+      delete updated[name];
+      return updated;
+    });
+    setTrainingMaxes(prev => {
+      const updated = { ...prev };
+      delete updated[name];
+      return updated;
+    });
   };
 
   const checkForPRs = (exerciseName, sets, logDate, exerciseType = 'strength') => {
@@ -1488,6 +1555,75 @@ const WorkoutTracker = () => {
                     </div>
                   ))}
                 </div>
+              )}
+            </div>
+
+            {/* Manage Exercises */}
+            <div className="bg-gray-800 p-4 rounded-lg border border-gray-700">
+              <h3 className="font-semibold text-gray-100 mb-3 flex items-center gap-2">
+                <Edit3 className="w-5 h-5 text-gray-400" />
+                Manage Exercises
+              </h3>
+              {getAllExerciseNames.length === 0 ? (
+                <p className="text-gray-400 text-sm">No exercises logged yet.</p>
+              ) : (
+                <>
+                  <input
+                    type="text"
+                    placeholder="Filter exercises..."
+                    value={exFilter}
+                    onChange={e => setExFilter(e.target.value)}
+                    className="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded-lg text-gray-100 text-sm mb-3 placeholder-gray-500"
+                  />
+                  <div className="space-y-1 max-h-72 overflow-y-auto">
+                    {getAllExerciseNames
+                      .filter(n => n.toLowerCase().includes(exFilter.toLowerCase()))
+                      .map(name => (
+                        <div key={name} className="flex items-center gap-2 p-2 rounded-lg hover:bg-gray-700/50 group">
+                          {exRenameTarget === name ? (
+                            <>
+                              <input
+                                type="text"
+                                value={exRenameValue}
+                                onChange={e => setExRenameValue(e.target.value)}
+                                onKeyDown={e => {
+                                  if (e.key === 'Enter') { renameExercise(name, exRenameValue); setExRenameTarget(null); }
+                                  if (e.key === 'Escape') setExRenameTarget(null);
+                                }}
+                                autoFocus
+                                className="flex-1 px-2 py-1 bg-gray-600 border border-purple-500 rounded text-gray-100 text-sm"
+                              />
+                              <button
+                                onClick={() => { renameExercise(name, exRenameValue); setExRenameTarget(null); }}
+                                className="text-xs px-2 py-1 bg-emerald-600 hover:bg-emerald-700 text-white rounded"
+                              >Save</button>
+                              <button
+                                onClick={() => setExRenameTarget(null)}
+                                className="text-xs px-2 py-1 bg-gray-600 hover:bg-gray-500 text-gray-300 rounded"
+                              >Cancel</button>
+                            </>
+                          ) : (
+                            <>
+                              <span className="flex-1 text-sm text-gray-200">{name}</span>
+                              <button
+                                onClick={() => { setExRenameTarget(name); setExRenameValue(name); }}
+                                className="opacity-0 group-hover:opacity-100 p-1 text-gray-400 hover:text-gray-200 transition-opacity"
+                                title="Rename"
+                              ><Edit3 className="w-3.5 h-3.5" /></button>
+                              <button
+                                onClick={() => {
+                                  if (window.confirm(`Delete all history for "${name}"? This removes it from all logs and PRs.`))
+                                    deleteExercise(name);
+                                }}
+                                className="opacity-0 group-hover:opacity-100 p-1 text-red-400 hover:text-red-300 transition-opacity"
+                                title="Delete"
+                              ><Trash2 className="w-3.5 h-3.5" /></button>
+                            </>
+                          )}
+                        </div>
+                      ))}
+                  </div>
+                </>
               )}
             </div>
 
@@ -3738,14 +3874,44 @@ const WorkoutTracker = () => {
             <div className="mb-4">
               <label className="text-xs text-gray-400 block mb-1">Exercise Name</label>
               {tmModalIsNew ? (
-                <input
-                  type="text"
-                  placeholder="e.g. Incline Bench Press"
-                  value={tmModalExercise}
-                  onChange={(e) => setTmModalExercise(e.target.value)}
-                  autoFocus
-                  className="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded-lg text-gray-100"
-                />
+                <div className="relative">
+                  <input
+                    type="text"
+                    placeholder="e.g. Incline Bench Press"
+                    value={tmModalExercise}
+                    onChange={(e) => setTmModalExercise(e.target.value)}
+                    autoFocus
+                    className="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded-lg text-gray-100"
+                  />
+                  {tmModalExercise.length >= 1 && (() => {
+                    const matches = getAllExerciseNames
+                      .filter(n => n.toLowerCase().includes(tmModalExercise.toLowerCase()) && n !== tmModalExercise)
+                      .slice(0, 6);
+                    if (matches.length === 0) return null;
+                    return (
+                      <div className="absolute z-10 w-full mt-1 bg-gray-800 border border-gray-600 rounded-lg shadow-lg max-h-48 overflow-y-auto">
+                        {matches.map(n => (
+                          <button
+                            key={n}
+                            onMouseDown={e => {
+                            e.preventDefault();
+                            setTmModalExercise(n);
+                            if (personalRecords[n]?.estimated1RM && !tmModalTrueRM) {
+                              setTmModalTrueRM(String(personalRecords[n].estimated1RM.value));
+                            }
+                          }}
+                            className="w-full text-left px-3 py-2 text-sm text-gray-200 hover:bg-gray-700 flex items-center justify-between"
+                          >
+                            <span>{n}</span>
+                            {personalRecords[n]?.estimated1RM && (
+                              <span className="text-xs text-purple-400">Est. 1RM: {personalRecords[n].estimated1RM.value} lb</span>
+                            )}
+                          </button>
+                        ))}
+                      </div>
+                    );
+                  })()}
+                </div>
               ) : (
                 <div className="px-3 py-2 bg-gray-700/50 border border-gray-700 rounded-lg text-gray-200 font-medium">
                   {tmModalExercise}
