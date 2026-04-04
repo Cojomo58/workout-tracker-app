@@ -564,6 +564,23 @@ const WorkoutTracker = () => {
     return roundToNearest2_5(tm.trainingMax * percentage / 100);
   };
 
+  // Get the best available 1RM for an exercise (explicit TM > estimated 1RM from PRs)
+  const getBest1RM = (exerciseName) => {
+    const tm = trainingMaxes[exerciseName];
+    if (tm) return tm.trainingMax; // already the TM (90% of 1RM by default)
+    const pr = personalRecords[exerciseName]?.estimated1RM?.value;
+    return pr ? roundToNearest2_5(pr * 0.9) : null; // default 90% if no explicit TM
+  };
+
+  // Suggest weight from reps using best available 1RM, returns { weight, pct, source }
+  const getSuggestedWeight = (exerciseName, reps) => {
+    const pct = repToTMPercent(reps);
+    if (!pct) return null;
+    const base = getBest1RM(exerciseName);
+    if (!base) return null;
+    return { weight: roundToNearest2_5(base * pct / 100), pct, source: trainingMaxes[exerciseName] ? 'tm' : 'e1rm' };
+  };
+
   const saveTrainingMax = (exerciseName, true1RM, pct = 90) => {
     setTrainingMaxes(prev => ({
       ...prev,
@@ -3175,26 +3192,25 @@ const WorkoutTracker = () => {
                               }}
                               className="px-3 py-2 bg-gray-700 border border-gray-600 rounded-lg w-20 text-gray-100"
                             />
-                            {/* Dynamic TM weight suggestion based on reps entered */}
+                            {/* Dynamic weight suggestion based on reps entered */}
                             {(() => {
-                              if (set.weightSource === 'tm-pct' || !set.reps || !trainingMaxes[exercise.name]) return null;
-                              const pct = repToTMPercent(set.reps);
-                              if (!pct) return null;
-                              const suggested = getPercentageWeight(exercise.name, pct);
-                              if (!suggested || suggested === parseFloat(set.weight)) return null;
+                              if (set.weightSource === 'tm-pct' || !set.reps) return null;
+                              const s = getSuggestedWeight(exercise.name, set.reps);
+                              if (!s || s.weight === parseFloat(set.weight)) return null;
+                              const label = s.source === 'e1rm' ? `~${s.pct}% est.1RM` : `~${s.pct}%TM`;
                               return (
                                 <button
                                   onClick={() => {
                                     const newExercises = [...exercises];
-                                    newExercises[exIdx].sets[setIdx].weight = String(suggested);
+                                    newExercises[exIdx].sets[setIdx].weight = String(s.weight);
                                     newExercises[exIdx].sets[setIdx].weightSource = 'tm-pct';
-                                    newExercises[exIdx].sets[setIdx].tmPct = pct;
+                                    newExercises[exIdx].sets[setIdx].tmPct = s.pct;
                                     setExercises(newExercises);
                                   }}
                                   className="text-xs text-purple-400 bg-purple-900/20 hover:bg-purple-900/40 border border-purple-700/30 px-2 py-0.5 rounded transition-colors"
-                                  title={`${pct}% of training max for ${set.reps} reps`}
+                                  title={`${s.pct}% of ${s.source === 'e1rm' ? 'estimated 1RM' : 'training max'} for ${set.reps} reps`}
                                 >
-                                  ~{pct}%TM → {suggested} lb
+                                  {label} → {s.weight} lb
                                 </button>
                               );
                             })()}
