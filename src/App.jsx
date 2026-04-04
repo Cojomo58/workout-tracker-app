@@ -77,6 +77,7 @@ const WorkoutTracker = () => {
   const [trainingMaxes, setTrainingMaxes] = useState({});
   const [showTMModal, setShowTMModal] = useState(false);
   const [tmModalExercise, setTmModalExercise] = useState('');
+  const [tmModalIsNew, setTmModalIsNew] = useState(false); // true = adding new, false = editing existing
   const [tmModalCalcWeight, setTmModalCalcWeight] = useState('');
   const [tmModalCalcReps, setTmModalCalcReps] = useState('');
   const [tmModalTrueRM, setTmModalTrueRM] = useState('');
@@ -1443,6 +1444,7 @@ const WorkoutTracker = () => {
                 <button
                   onClick={() => {
                     setTmModalExercise('');
+                    setTmModalIsNew(true);
                     setTmModalTrueRM('');
                     setTmModalPercent('90');
                     setTmModalCalcWeight('');
@@ -1471,6 +1473,7 @@ const WorkoutTracker = () => {
                       <button
                         onClick={() => {
                           setTmModalExercise(name);
+                          setTmModalIsNew(false);
                           setTmModalTrueRM(String(tm.true1RM));
                           setTmModalPercent(String(tm.trainingMaxPercent));
                           setTmModalCalcWeight('');
@@ -1771,6 +1774,7 @@ const WorkoutTracker = () => {
                           <button
                             onClick={() => {
                               setTmModalExercise(selectedExerciseHistory);
+                              setTmModalIsNew(!trainingMaxes[selectedExerciseHistory]);
                               setTmModalTrueRM(String(personalRecords[selectedExerciseHistory].estimated1RM.value));
                               setTmModalPercent(String(trainingMaxes[selectedExerciseHistory]?.trainingMaxPercent || 90));
                               setTmModalCalcWeight('');
@@ -3564,6 +3568,7 @@ const WorkoutTracker = () => {
                         <button
                           onClick={() => {
                             setTmModalExercise(pr.exerciseName);
+                            setTmModalIsNew(!trainingMaxes[pr.exerciseName]);
                             setTmModalTrueRM(String(pr.value));
                             setTmModalPercent(String(trainingMaxes[pr.exerciseName]?.trainingMaxPercent || 90));
                             setTmModalCalcWeight('');
@@ -3724,24 +3729,29 @@ const WorkoutTracker = () => {
             <div className="flex justify-between items-center mb-4">
               <h2 className="text-lg font-bold text-gray-100 flex items-center gap-2">
                 <Dumbbell className="w-5 h-5 text-purple-400" />
-                {tmModalExercise ? `Training Max — ${tmModalExercise}` : 'Set Training Max'}
+                {tmModalIsNew ? 'Add Training Max' : 'Edit Training Max'}
               </h2>
               <button onClick={() => setShowTMModal(false)} className="text-gray-400 hover:text-gray-200">
                 <X className="w-5 h-5" />
               </button>
             </div>
-            {!tmModalExercise && (
-              <div className="mb-4">
-                <label className="text-xs text-gray-400 block mb-1">Exercise Name</label>
+            <div className="mb-4">
+              <label className="text-xs text-gray-400 block mb-1">Exercise Name</label>
+              {tmModalIsNew ? (
                 <input
                   type="text"
-                  placeholder="e.g. Bench Press"
+                  placeholder="e.g. Incline Bench Press"
                   value={tmModalExercise}
                   onChange={(e) => setTmModalExercise(e.target.value)}
+                  autoFocus
                   className="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded-lg text-gray-100"
                 />
-              </div>
-            )}
+              ) : (
+                <div className="px-3 py-2 bg-gray-700/50 border border-gray-700 rounded-lg text-gray-200 font-medium">
+                  {tmModalExercise}
+                </div>
+              )}
+            </div>
 
             {/* Calculator */}
             <div className="bg-gray-900/50 rounded-lg p-4 mb-4 border border-gray-700">
