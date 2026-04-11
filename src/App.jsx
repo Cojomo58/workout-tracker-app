@@ -98,8 +98,6 @@ const WorkoutTracker = () => {
   const [authEmail, setAuthEmail] = useState('');
   const [authPassword, setAuthPassword] = useState('');
   const [authError, setAuthError] = useState('');
-  // Weekly scheme editor — tracks which exercise panel is open: "${dayKey}-${exIdx}"
-  const [openWeeklyScheme, setOpenWeeklyScheme] = useState(null);
   // Manage exercises (rename / delete across all logs + PRs)
   const [exRenameTarget, setExRenameTarget] = useState(null); // name being renamed
   const [exRenameValue, setExRenameValue] = useState('');
@@ -572,9 +570,9 @@ const WorkoutTracker = () => {
   // Get the best available 1RM for an exercise (explicit TM > estimated 1RM from PRs)
   const getBest1RM = (exerciseName) => {
     const tm = trainingMaxes[exerciseName];
-    if (tm) return tm.trainingMax; // already the TM (90% of 1RM by default)
+    if (tm) return tm.true1RM;
     const pr = personalRecords[exerciseName]?.estimated1RM?.value;
-    return pr ? roundToNearest2_5(pr * 0.9) : null; // default 90% if no explicit TM
+    return pr || null;
   };
 
   // Suggest weight from reps using best available 1RM, returns { weight, pct, source }
@@ -613,51 +611,6 @@ const WorkoutTracker = () => {
       }
     }
     return r > 20 ? 55 : null;
-  };
-
-  // Weekly scheme helpers (template editor)
-  const updateWeeklySchemeSet = (dayKey, exIdx, weekIdx, setIdx, field, value) => {
-    const newBlocks = [...blocks];
-    const ex = newBlocks[0].template[dayKey].exercises[exIdx];
-    if (!ex.weeklyScheme) ex.weeklyScheme = [];
-    if (!ex.weeklyScheme[weekIdx]) ex.weeklyScheme[weekIdx] = [];
-    ex.weeklyScheme[weekIdx] = ex.weeklyScheme[weekIdx].map((s, i) =>
-      i === setIdx ? { ...s, [field]: field === 'pct' ? (value === '' ? '' : parseFloat(value) || '') : value } : s
-    );
-    setBlocks(newBlocks);
-  };
-
-  const addWeeklySchemeSet = (dayKey, exIdx, weekIdx) => {
-    const newBlocks = [...blocks];
-    const ex = newBlocks[0].template[dayKey].exercises[exIdx];
-    if (!ex.weeklyScheme) ex.weeklyScheme = [];
-    if (!ex.weeklyScheme[weekIdx]) ex.weeklyScheme[weekIdx] = [];
-    ex.weeklyScheme[weekIdx] = [...ex.weeklyScheme[weekIdx], { reps: '', pct: '' }];
-    setBlocks(newBlocks);
-  };
-
-  const removeWeeklySchemeSet = (dayKey, exIdx, weekIdx, setIdx) => {
-    const newBlocks = [...blocks];
-    const ex = newBlocks[0].template[dayKey].exercises[exIdx];
-    ex.weeklyScheme[weekIdx] = ex.weeklyScheme[weekIdx].filter((_, i) => i !== setIdx);
-    setBlocks(newBlocks);
-  };
-
-  const apply531Preset = (dayKey, exIdx) => {
-    const newBlocks = [...blocks];
-    newBlocks[0].template[dayKey].exercises[exIdx].weeklyScheme = [
-      [{ reps: '5', pct: 65 }, { reps: '5', pct: 75 }, { reps: '5', pct: 85 }],
-      [{ reps: '3', pct: 70 }, { reps: '3', pct: 80 }, { reps: '3', pct: 90 }],
-      [{ reps: '5', pct: 75 }, { reps: '3', pct: 85 }, { reps: '1', pct: 95 }],
-      [{ reps: '5', pct: 40 }, { reps: '5', pct: 50 }, { reps: '5', pct: 60 }],
-    ];
-    setBlocks(newBlocks);
-  };
-
-  const clearWeeklyScheme = (dayKey, exIdx) => {
-    const newBlocks = [...blocks];
-    delete newBlocks[0].template[dayKey].exercises[exIdx].weeklyScheme;
-    setBlocks(newBlocks);
   };
 
   const renameExercise = (oldName, newName) => {
@@ -2332,111 +2285,42 @@ const WorkoutTracker = () => {
                               }}
                               className="w-full px-2 py-1 bg-gray-700 border border-gray-600 rounded text-gray-100 text-sm"
                             />
-                            {exercise.percentage && trainingMaxes[exercise.name] && (
-                              <p className="text-xs text-purple-400 mt-1">
-                                = {getPercentageWeight(exercise.name, exercise.percentage)} lb
-                              </p>
-                            )}
-                            {exercise.percentage && !trainingMaxes[exercise.name] && (
-                              <p className="text-xs text-gray-500 mt-1">No TM set</p>
-                            )}
+                            {(() => {
+                              const tmKey = exercise.tmLink || exercise.name;
+                              const tm = trainingMaxes[tmKey];
+                              if (exercise.percentage && tm) return (
+                                <p className="text-xs text-purple-400 mt-1">= {getPercentageWeight(tmKey, exercise.percentage)} lb</p>
+                              );
+                              if (exercise.percentage && !tm) return (
+                                <p className="text-xs text-gray-500 mt-1">No TM set</p>
+                              );
+                              return null;
+                            })()}
                           </div>
                         </div>
 
-                        {/* Weekly Progression */}
-                        {(() => {
-                          const schemeKey = `${dayKey}-${exIdx}`;
-                          const isOpen = openWeeklyScheme === schemeKey;
-                          const hasScheme = exercise.weeklyScheme?.some(w => w?.length > 0);
-                          const numWeeks = blocks[0]?.weeks || 4;
-                          return (
-                            <div className="mt-2 border-t border-gray-700/50 pt-2">
-                              <button
-                                onClick={() => setOpenWeeklyScheme(isOpen ? null : schemeKey)}
-                                className="text-xs text-purple-400 hover:text-purple-300 flex items-center gap-1 transition-colors"
-                              >
-                                <span className={`transition-transform inline-block ${isOpen ? 'rotate-90' : ''}`}>▶</span>
-                                Weekly Progression
-                                {hasScheme && <span className="ml-1 w-1.5 h-1.5 rounded-full bg-purple-400 inline-block" />}
-                              </button>
+                        {/* Linked TM */}
+                        {Object.keys(trainingMaxes).length > 0 && (
+                          <div className="mt-2">
+                            <label className="text-xs text-gray-500" title="Link this exercise to a specific Training Max for % auto-fill and live % display">Linked TM</label>
+                            <select
+                              value={exercise.tmLink || ''}
+                              onChange={(e) => {
+                                const newBlocks = [...blocks];
+                                const val = e.target.value;
+                                newBlocks[0].template[dayKey].exercises[exIdx].tmLink = val || undefined;
+                                setBlocks(newBlocks);
+                              }}
+                              className="w-full px-2 py-1 bg-gray-700 border border-gray-600 rounded text-gray-100 text-sm mt-1"
+                            >
+                              <option value="">— match by name —</option>
+                              {Object.keys(trainingMaxes).map(name => (
+                                <option key={name} value={name}>{name} ({trainingMaxes[name].trainingMax} lb)</option>
+                              ))}
+                            </select>
+                          </div>
+                        )}
 
-                              {isOpen && (
-                                <div className="mt-2 space-y-1.5">
-                                  {/* Presets */}
-                                  <div className="flex gap-2 mb-3">
-                                    <button
-                                      onClick={() => apply531Preset(dayKey, exIdx)}
-                                      className="text-xs px-2 py-1 bg-purple-600/20 hover:bg-purple-600/30 text-purple-400 rounded border border-purple-600/30 transition-colors"
-                                    >
-                                      5/3/1 Preset
-                                    </button>
-                                    {hasScheme && (
-                                      <button
-                                        onClick={() => clearWeeklyScheme(dayKey, exIdx)}
-                                        className="text-xs px-2 py-1 bg-gray-600/20 hover:bg-gray-600/30 text-gray-400 rounded border border-gray-600/30 transition-colors"
-                                      >
-                                        Clear
-                                      </button>
-                                    )}
-                                  </div>
-
-                                  {/* Week rows */}
-                                  {Array.from({ length: numWeeks }, (_, i) => i).map(weekIdx => {
-                                    const scheme = exercise.weeklyScheme?.[weekIdx] || [];
-                                    return (
-                                      <div key={weekIdx} className="flex items-start gap-2 flex-wrap">
-                                        <span className="text-xs text-gray-400 w-10 pt-1.5 shrink-0">
-                                          Wk {weekIdx + 1}
-                                        </span>
-                                        <div className="flex gap-1.5 flex-wrap items-center">
-                                          {scheme.map((s, sIdx) => (
-                                            <div key={sIdx} className="flex items-center gap-1 bg-gray-700/60 rounded px-1.5 py-1 border border-gray-600/50">
-                                              <input
-                                                type="text"
-                                                inputMode="decimal"
-                                                value={s.reps}
-                                                onChange={(e) => updateWeeklySchemeSet(dayKey, exIdx, weekIdx, sIdx, 'reps', e.target.value)}
-                                                className="w-7 text-xs bg-transparent text-gray-100 text-center outline-none"
-                                                placeholder="r"
-                                              />
-                                              <span className="text-gray-500 text-xs">r@</span>
-                                              <input
-                                                type="text"
-                                                inputMode="decimal"
-                                                value={s.pct}
-                                                onChange={(e) => updateWeeklySchemeSet(dayKey, exIdx, weekIdx, sIdx, 'pct', e.target.value)}
-                                                className="w-9 text-xs bg-transparent text-purple-300 text-center outline-none"
-                                                placeholder="%"
-                                              />
-                                              <span className="text-gray-500 text-xs">%</span>
-                                              {s.pct && trainingMaxes[exercise.name] && (
-                                                <span className="text-xs text-gray-500 ml-0.5">
-                                                  ={getPercentageWeight(exercise.name, parseFloat(s.pct)) ?? '?'}lb
-                                                </span>
-                                              )}
-                                              <button
-                                                onClick={() => removeWeeklySchemeSet(dayKey, exIdx, weekIdx, sIdx)}
-                                                className="text-red-400 hover:text-red-300 ml-0.5"
-                                              >
-                                                <X className="w-3 h-3" />
-                                              </button>
-                                            </div>
-                                          ))}
-                                          <button
-                                            onClick={() => addWeeklySchemeSet(dayKey, exIdx, weekIdx)}
-                                            className="text-xs text-gray-400 hover:text-gray-200 px-1.5 py-1 rounded bg-gray-700/40 hover:bg-gray-700 transition-colors"
-                                          >
-                                            + set
-                                          </button>
-                                        </div>
-                                      </div>
-                                    );
-                                  })}
-                                </div>
-                              )}
-                            </div>
-                          );
-                        })()}
                       </div>
                     ))}
 
@@ -2463,7 +2347,7 @@ const WorkoutTracker = () => {
             </div>
 
             {/* Reset Template */}
-            <div className="pt-4 border-t border-gray-700">
+            <div className="pt-4 border-t border-gray-700 flex flex-wrap gap-3">
               <button
                 onClick={() => {
                   if (window.confirm('Reset template to default? This will clear all your custom workout days and exercises.')) {
@@ -2484,6 +2368,32 @@ const WorkoutTracker = () => {
                 className="px-4 py-2 bg-red-600/20 hover:bg-red-600/30 text-red-400 rounded-lg text-sm"
               >
                 Reset to Default Template
+              </button>
+              <button
+                onClick={() => {
+                  if (window.confirm('Full reset? This will clear all workout logs, your template, and training maxes — but keep your personal records (PRs). This cannot be undone.')) {
+                    const defaultTemplate = {
+                      id: 1,
+                      name: 'Block A - Hypertrophy Focus',
+                      weeks: 4,
+                      template: {
+                        monday: { name: 'Upper Body (Push Focus)', exercises: [] },
+                        wednesday: { name: 'Lower Body', exercises: [] },
+                        friday: { name: 'Upper Body (Pull Focus)', exercises: [] }
+                      }
+                    };
+                    setBlocks([defaultTemplate]);
+                    setWorkoutLogs({});
+                    setWeeklyMetrics({});
+                    setTrainingMaxes({});
+                    setCurrentBlock(1);
+                    setBlockMetadata({});
+                    setCurrentWeek(1);
+                  }
+                }}
+                className="px-4 py-2 bg-red-900/30 hover:bg-red-900/50 text-red-400 border border-red-800/40 rounded-lg text-sm"
+              >
+                Full Reset (Keep PRs)
               </button>
             </div>
           </div>
@@ -2645,6 +2555,7 @@ const WorkoutTracker = () => {
                               technique: ex.technique,
                               templateTarget: tmplEx ? `${tmplEx.sets}×${tmplEx.reps}` : null,
                               templatePercentage: tmplEx?.percentage || null,
+                              tmLink: tmplEx?.tmLink || null,
                               sets: ex.sets.map(s =>
                                 exType === 'bodyweight'
                                   ? { reps: s.reps || '', holdTime: s.holdTime || '' }
@@ -2661,37 +2572,11 @@ const WorkoutTracker = () => {
                         } else {
                           setExercises(workout?.exercises.map(ex => {
                             const exType = ex.type || 'strength';
-                            const weekScheme = exType === 'strength'
-                              ? ex.weeklyScheme?.[currentWeek - 1]
-                              : null;
 
-                            // Weekly scheme takes priority over single percentage
-                            if (weekScheme && weekScheme.length > 0) {
-                              const schemeLabel = weekScheme
-                                .map(s => `${s.reps || '?'}r@${s.pct || '?'}%`)
-                                .join(', ');
-                              return {
-                                name: ex.name,
-                                type: exType,
-                                technique: ex.technique,
-                                templateTarget: schemeLabel,
-                                templatePercentage: null,
-                                sets: weekScheme.map(s => {
-                                  const w = s.pct ? getPercentageWeight(ex.name, s.pct) : null;
-                                  return {
-                                    weight: w ? String(w) : '',
-                                    reps: s.reps || '',
-                                    weightSource: w ? 'tm-pct' : 'manual',
-                                    tmPct: s.pct || null
-                                  };
-                                }),
-                                notes: ''
-                              };
-                            }
-
-                            // Fallback: single percentage
+                            // Auto-fill weight from % of TM (use tmLink if set)
+                            const tmLookup = ex.tmLink || ex.name;
                             const pctWeight = (ex.percentage && exType === 'strength')
-                              ? getPercentageWeight(ex.name, ex.percentage)
+                              ? getPercentageWeight(tmLookup, ex.percentage)
                               : null;
                             return {
                               name: ex.name,
@@ -2699,6 +2584,7 @@ const WorkoutTracker = () => {
                               technique: ex.technique,
                               templateTarget: (ex.sets && ex.reps) ? `${ex.sets}×${ex.reps}` : null,
                               templatePercentage: ex.percentage || null,
+                              tmLink: ex.tmLink || null,
                               sets: Array(parseInt(ex.sets) || 3).fill(null).map(() => ({
                                 weight: pctWeight ? String(pctWeight) : '',
                                 reps: '',
@@ -3079,16 +2965,6 @@ const WorkoutTracker = () => {
                       </div>
                     )}
 
-                    {/* Template target hint */}
-                    {exercise.templateTarget && (
-                      <div className="flex items-center gap-2 mb-2">
-                        <span className="text-xs text-gray-500">Target:</span>
-                        <span className="text-xs text-emerald-400 font-medium">{exercise.templateTarget}</span>
-                        {exercise.templatePercentage && trainingMaxes[exercise.name] && (
-                          <span className="text-xs text-purple-400">@ {exercise.templatePercentage}% TM ({trainingMaxes[exercise.name].trainingMax} lb)</span>
-                        )}
-                      </div>
-                    )}
 
                     <div className="space-y-2">
                       {exercise.sets.map((set, setIdx) => {
@@ -3297,14 +3173,6 @@ const WorkoutTracker = () => {
                         return (
                           <div key={setIdx} className="flex gap-2 items-center flex-wrap">
                             <span className="text-sm font-medium text-gray-400 w-12">Set {setIdx + 1}</span>
-                            {set.weightSource === 'tm-pct' && (set.tmPct || exercise.templatePercentage) && (
-                              <span
-                                title={`${set.tmPct || exercise.templatePercentage}% of Training Max`}
-                                className="text-xs bg-purple-900/50 text-purple-300 border border-purple-700/50 px-1.5 py-0.5 rounded"
-                              >
-                                {set.tmPct || exercise.templatePercentage}% TM
-                              </span>
-                            )}
                             <input
                               type="text"
                               inputMode="decimal"
@@ -3319,6 +3187,21 @@ const WorkoutTracker = () => {
                               }}
                               className="px-3 py-2 bg-gray-700 border border-gray-600 rounded-lg w-24 text-gray-100"
                             />
+                            {(() => {
+                              const lookupKey = exercise.tmLink || exercise.name;
+                              const nameLower = lookupKey?.toLowerCase().trim();
+                              const tmData = trainingMaxes[lookupKey] ||
+                                Object.entries(trainingMaxes).find(([k]) => k.toLowerCase().trim() === nameLower)?.[1];
+                              const base = tmData?.trainingMax;
+                              const w = parseFloat(set.weight);
+                              if (!base || !w) return null;
+                              const pct = (w / base * 100).toFixed(1).replace(/\.0$/, '');
+                              return (
+                                <span className="text-xs text-purple-300" title={`${pct}% of TM (${base} lb)`}>
+                                  {pct}%TM
+                                </span>
+                              );
+                            })()}
                             <span className="text-gray-400">lb ×</span>
                             <input
                               type="text"
@@ -3332,28 +3215,6 @@ const WorkoutTracker = () => {
                               }}
                               className="px-3 py-2 bg-gray-700 border border-gray-600 rounded-lg w-20 text-gray-100"
                             />
-                            {/* Dynamic weight suggestion based on reps entered */}
-                            {(() => {
-                              if (set.weightSource === 'tm-pct' || !set.reps) return null;
-                              const s = getSuggestedWeight(exercise.name, set.reps);
-                              if (!s || s.weight === parseFloat(set.weight)) return null;
-                              const label = s.source === 'e1rm' ? `~${s.pct}% est.1RM` : `~${s.pct}%TM`;
-                              return (
-                                <button
-                                  onClick={() => {
-                                    const newExercises = [...exercises];
-                                    newExercises[exIdx].sets[setIdx].weight = String(s.weight);
-                                    newExercises[exIdx].sets[setIdx].weightSource = 'tm-pct';
-                                    newExercises[exIdx].sets[setIdx].tmPct = s.pct;
-                                    setExercises(newExercises);
-                                  }}
-                                  className="text-xs text-purple-400 bg-purple-900/20 hover:bg-purple-900/40 border border-purple-700/30 px-2 py-0.5 rounded transition-colors"
-                                  title={`${s.pct}% of ${s.source === 'e1rm' ? 'estimated 1RM' : 'training max'} for ${set.reps} reps`}
-                                >
-                                  {label} → {s.weight} lb
-                                </button>
-                              );
-                            })()}
                             {comparison === 'improved' && (
                               <span className="text-emerald-400 text-sm" title="Improvement over previous session">↑</span>
                             )}
