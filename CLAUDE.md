@@ -110,9 +110,10 @@ trainingMaxes = {
 ### Template Exercise (with TM support)
 ```javascript
 // blocks[0].template[dayKey].exercises[n]
-{ name, sets, reps, technique, rest, percentage }
+{ name, sets, reps, technique, rest, percentage, tmLink }
 // percentage (optional): % of training max used to auto-fill set weights
-// Live lb preview shown in template editor when trainingMaxes[name] exists
+// tmLink (optional): explicit training max key to use instead of matching by exercise name
+// Live lb preview shown in template editor when a matching TM exists
 ```
 
 ## Key Functions (App.jsx)
@@ -142,16 +143,18 @@ trainingMaxes = {
 - Starting a new block: increments `currentBlock`, resets `currentWeek` to 1, copies no data
 - Past blocks: fully browseable but read-only (empty days non-clickable, Save button hidden)
 
-## Training Max System (v2.1)
+## Training Max System (v2.3)
 - Set per-exercise training max: enter true 1RM directly or calculate via Epley formula (weight × reps)
 - Configurable TM% per exercise (default 90%); stored as `trainingMaxPercent` + derived `trainingMax`
 - Training Maxes panel in Progress view with add/edit buttons
 - "Set as Training Max" button on Est. 1RM PR card in exercise history
 - "Use as Training Max" button in PR celebration modal for estimated1RM PRs
-- Template editor has `% of TM` column per exercise with live lb preview
-- Auto-fill: when opening a fresh workout from template, exercises with `percentage` + a TM get weights pre-filled
-- Auto-filled sets show a purple `75%TM` badge; cleared on manual weight edit
-- Template target hint (e.g. `Target: 3×8-10`) shown above sets in log view
+- Template editor has `% of TM` field per exercise with live lb preview
+- Template editor has `Linked TM` dropdown per exercise — explicitly links to a TM by name, bypassing name-match lookup; stored as `tmLink` on the template exercise
+- Auto-fill: when opening a fresh workout from template, exercises with `percentage` + a TM (via `tmLink` or name match) get weights pre-filled
+- Live `%TM` display next to weight input while logging — shows `weight ÷ trainingMax × 100`, updates as you type; uses `tmLink` if set, then case-insensitive name fallback
+- `getBest1RM(exerciseName)`: returns `true1RM` from trainingMaxes if set, else estimated1RM from PRs
+- Weekly progression / 5/3/1 scheme removed — simple single `% of TM` per exercise only
 
 ## Data Flow
 ```
@@ -228,7 +231,9 @@ npm run preview # Preview production build
 ## Notes
 - Single-file architecture in App.jsx + supabaseClient.js
 - Cloud sync via Supabase when logged in, localStorage-only guest mode when not
-- Export/import works regardless of login state (reads from React state); export version 2.1
+- Export/import works regardless of login state (reads from React state); export version 2.1 (unchanged)
+- "Full Reset (Keep PRs)" button in template editor: clears logs, template, metrics, training maxes, resets block to 1 — preserves personalRecords
+- Previous session data shown inline while logging (blue banner per exercise with last session date + sets)
 - Fuzzy search enabled for exercise name matching
 - Auth supports email/password only (Google OAuth removed)
 - Body weight chart sorts by `blockNum * 1000 + weekNum` for correct cross-block ordering; X-axis labels use `B1W3` format
