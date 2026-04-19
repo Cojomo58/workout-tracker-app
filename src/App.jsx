@@ -72,6 +72,7 @@ const WorkoutTracker = () => {
   const [personalRecords, setPersonalRecords] = useState({});
   const [newPRs, setNewPRs] = useState([]);
   const [showPRModal, setShowPRModal] = useState(false);
+  const [prTMSaved, setPrTMSaved] = useState({}); // tracks which PR indices saved as TM during modal
 
   // Training Maxes State
   const [trainingMaxes, setTrainingMaxes] = useState({});
@@ -103,6 +104,19 @@ const WorkoutTracker = () => {
   const [exRenameValue, setExRenameValue] = useState('');
   const [exFilter, setExFilter] = useState('');
   const saveTimeoutRef = useRef(null);
+
+  // App Settings (API key + health context for Claude reports)
+  const [showSettingsModal, setShowSettingsModal] = useState(false);
+  // API key: sessionStorage only — never written to localStorage or disk; clears on tab close
+  const [apiKey, setApiKey] = useState(''); // never pre-populated from storage; user must re-enter each session
+  const [healthContext, setHealthContext] = useState(() => localStorage.getItem('health-context') || '');
+  const [settingsSaved, setSettingsSaved] = useState(false);
+
+  // Claude Health Reports state
+  const [reportResults, setReportResults] = useState({}); // { reportType: generatedText }
+  const [reportLoading, setReportLoading] = useState({}); // { reportType: bool }
+  const [reportError, setReportError] = useState({}); // { reportType: errorMsg }
+  const [garminText, setGarminText] = useState({}); // { reportType: parsedText }
 
   // Migrate PRs from historical workout data
   const migrateHistoricalPRs = (logs) => {
@@ -1061,6 +1075,291 @@ const WorkoutTracker = () => {
       .filter(d => d.value > 0);
   };
 
+  // Parse a Garmin Connect CSV export into a compact summary string
+  // Parse Garmin CSV into a date-keyed map: { "YYYY-MM-DD": { sleep, steps, avgHR, stress, bodyBattery, ... } }
+  // Handles: activity exports, daily wellness exports, sleep exports — auto-detects columns
+  const parseGarminToDateMap = (text) => {
+    if (!text || !text.trim()) return {};
+    try {
+      const splitCsvLine = (line) => {
+        const result = []; let cur = ''; let inQ = false;
+        for (const ch of line) {
+          if (ch === '"') { inQ = !inQ; continue; }
+          if (ch === ',' && !inQ) { result.push(cur.trim()); cur = ''; continue; }
+          cur += ch;
+        }
+        result.push(cur.trim());
+        return result;
+      };
+
+      const normalizeDate = (raw) => {
+        if (!raw) return null;
+        const isoMatch = raw.match(/^(\d{4}-\d{2}-\d{2})/);
+        if (isoMatch) return isoMatch[1];
+        const mdyMatch = raw.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})/);
+        if (mdyMatch) return `${mdyMatch[3]}-${mdyMatch[1].padStart(2,'0')}-${mdyMatch[2].padStart(2,'0')}`;
+        const months = { jan:1,feb:2,mar:3,apr:4,may:5,jun:6,jul:7,aug:8,sep:9,oct:10,nov:11,dec:12 };
+        const mdy2 = raw.match(/^([A-Za-z]{3,9})\s+(\d{1,2}),?\s+(\d{4})/);
+        if (mdy2) { const m = months[mdy2[1].toLowerCase().slice(0,3)]; if (m) return `${mdy2[3]}-${String(m).padStart(2,'0')}-${mdy2[2].padStart(2,'0')}`; }
+        return null;
+      };
+
+      // Column name patterns → metric keys
+      const metricDefs = [
+        { keys: ['sleep time','total sleep','sleep score','sleep duration','unmeasurable sleep'], name: 'sleep' },
+        { keys: ['deep sleep'], name: 'deepSleep' },
+        { keys: ['rem sleep'], name: 'remSleep' },
+        { keys: ['light sleep'], name: 'lightSleep' },
+        { keys: ['awake duration', 'awake time'], name: 'awake' },
+        { keys: ['steps'], name: 'steps' },
+        { keys: ['avg stress level','average stress','avg stress'], name: 'avgStress' },
+        { keys: ['max stress level','max stress'], name: 'maxStress' },
+        { keys: ['resting heart rate','resting hr'], name: 'restingHR' },
+        { keys: ['body battery level high','body battery high','body battery max','body battery charged','body battery start'], name: 'bbHigh' },
+        { keys: ['body battery level low','body battery low','body battery min','body battery drained','body battery end'], name: 'bbLow' },
+        { keys: ['avg hr','average hr','average heart rate'], name: 'avgHR' },
+        { keys: ['max hr','max heart rate'], name: 'maxHR' },
+        { keys: ['calories','total calories','active calories'], name: 'calories' },
+        { keys: ['distance'], name: 'distance' },
+        { keys: ['floors climbed','floors'], name: 'floors' },
+        { keys: ['active minutes','moderate activity minutes','vigorous activity minutes'], name: 'activeMinutes' },
+        { keys: ['spo2','pulse ox'], name: 'spo2' },
+        { keys: ['average daily respiration rate','avg respiration','respiration'], name: 'respiration' },
+        { keys: ['activity type'], name: 'activityType' },
+        { keys: ['title','activity name','workout title'], name: 'title' },
+      ];
+
+      const lines = text.trim().split('\n').filter(l => l.trim());
+      if (lines.length < 2) return {};
+      const headers = splitCsvLine(lines[0]);
+
+      let dateColIdx = headers.findIndex(h => /^date$/i.test(h.trim()));
+      if (dateColIdx < 0) dateColIdx = headers.findIndex(h => /\bdate\b/i.test(h));
+      if (dateColIdx < 0) return {};
+
+      const metricCols = metricDefs.map(({ keys, name }) => {
+        const idx = headers.findIndex(h => keys.some(k => h.toLowerCase().trim().includes(k)));
+        return idx >= 0 ? { name, idx } : null;
+      }).filter(Boolean);
+
+      const dateMap = {};
+      lines.slice(1).forEach(line => {
+        const row = splitCsvLine(line);
+        const date = normalizeDate(row[dateColIdx]);
+        if (!date) return;
+        if (!dateMap[date]) dateMap[date] = {};
+        metricCols.forEach(({ name, idx }) => {
+          const val = row[idx]?.trim();
+          if (!val || val === '--') return;
+          // Accumulate activity types/titles (multiple activities per day); last-write wins for health metrics
+          if (name === 'activityType' || name === 'title') {
+            dateMap[date][name] = dateMap[date][name] ? `${dateMap[date][name]}, ${val}` : val;
+          } else {
+            dateMap[date][name] = val;
+          }
+        });
+      });
+      return dateMap;
+    } catch {
+      return {};
+    }
+  };
+
+  // Render a Garmin date-map entry as a compact inline string to inject into workout entries
+  const formatGarminDay = (entry) => {
+    if (!entry || Object.keys(entry).length === 0) return null;
+    const parts = [];
+    if (entry.sleep) parts.push(`Sleep: ${entry.sleep}`);
+    if (entry.deepSleep) parts.push(`Deep: ${entry.deepSleep}`);
+    if (entry.remSleep) parts.push(`REM: ${entry.remSleep}`);
+    if (entry.bbHigh != null && entry.bbLow != null) parts.push(`Body Battery: ${entry.bbHigh}→${entry.bbLow}`);
+    else if (entry.bbHigh) parts.push(`Body Battery: ${entry.bbHigh}`);
+    if (entry.avgStress) parts.push(`Avg Stress: ${entry.avgStress}`);
+    if (entry.maxStress) parts.push(`Max Stress: ${entry.maxStress}`);
+    if (entry.restingHR) parts.push(`Resting HR: ${entry.restingHR}`);
+    if (entry.avgHR) parts.push(`Avg HR: ${entry.avgHR}`);
+    if (entry.spo2) parts.push(`SpO2: ${entry.spo2}`);
+    if (entry.steps) {
+      const n = parseInt(String(entry.steps).replace(/,/g,''));
+      parts.push(`Steps: ${isNaN(n) ? entry.steps : n.toLocaleString()}`);
+    }
+    if (entry.activeMinutes) parts.push(`Active min: ${entry.activeMinutes}`);
+    if (entry.activityType && entry.title) parts.push(`Activity: ${entry.title} (${entry.activityType})`);
+    else if (entry.activityType) parts.push(`Activity: ${entry.activityType}`);
+    return parts.length ? parts.join(' | ') : null;
+  };
+
+  // Build prompt payload for a given report type
+  const buildReportPrompt = (reportType, rawGarminText) => {
+    const now = new Date();
+    const cutoff7 = new Date(now - 7 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
+    const cutoff14 = new Date(now - 14 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
+    const cutoff30 = new Date(now - 30 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
+
+    // Parse Garmin CSV once — used for both per-workout correlation and summary
+    const garminDateMap = parseGarminToDateMap(rawGarminText || '');
+    const hasGarmin = Object.keys(garminDateMap).length > 0;
+
+    const filterLogs = (afterDate) => {
+      const result = {};
+      Object.entries(workoutLogs).forEach(([key, log]) => {
+        if (log.date >= afterDate) result[key] = log;
+      });
+      return result;
+    };
+
+    // Format logs with Garmin health data auto-correlated per workout date
+    const formatLogs = (logs) => Object.entries(logs)
+      .sort(([,a],[,b]) => a.date.localeCompare(b.date))
+      .map(([key, log]) => {
+        const exSummary = log.exercises.map(ex => {
+          const type = ex.type || 'strength';
+          const setStr = ex.sets.map(s => {
+            if (type === 'cardio') return `${s.distance || '?'} ${s.unit || 'mi'} in ${s.time || '?'}`;
+            if (type === 'tabata') return `${s.rounds || '?'} rounds @ ${s.workSeconds || '20'}s on/${s.restSeconds || '10'}s off`;
+            if (type === 'bodyweight') return `${s.reps || '?'} reps${s.holdTime ? ` / ${s.holdTime}s hold` : ''}`;
+            return `${s.weight || '?'}lb × ${s.reps || '?'}`;
+          }).join(', ');
+          return `  - ${ex.name} (${type}): ${setStr}${ex.notes ? ` [note: ${ex.notes}]` : ''}`;
+        }).join('\n');
+
+        // Auto-correlate Garmin health metrics for this workout date
+        const garminLine = hasGarmin ? formatGarminDay(garminDateMap[log.date]) : null;
+
+        return `${log.date}:\n${exSummary}${garminLine ? `\n  [Garmin] ${garminLine}` : ''}`;
+      }).join('\n\n');
+
+    // Garmin summary for non-workout days in the period (rest day recovery context)
+    const formatGarminSummary = (afterDate) => {
+      if (!hasGarmin) return null;
+      const workoutDates = new Set(Object.values(workoutLogs).map(l => l.date));
+      const restDays = Object.entries(garminDateMap)
+        .filter(([date]) => date >= afterDate && !workoutDates.has(date))
+        .sort(([a],[b]) => a.localeCompare(b))
+        .map(([date, entry]) => {
+          const metrics = formatGarminDay(entry);
+          return metrics ? `${date} (rest): ${metrics}` : null;
+        }).filter(Boolean);
+      return restDays.length ? restDays.join('\n') : null;
+    };
+
+    const formatBodyWeight = (afterDate) => Object.entries(weeklyMetrics)
+      .filter(([, v]) => v.lastUpdated >= afterDate)
+      .map(([k, v]) => `${v.lastUpdated}: ${v.bodyWeight} lb (${k})`)
+      .join('\n') || 'No data';
+
+    const formatPRs = (exerciseNames) => exerciseNames.map(name => {
+      const pr = personalRecords[name];
+      if (!pr) return null;
+      const parts = [];
+      if (pr.maxWeight) parts.push(`Max weight: ${pr.maxWeight.value} lb × ${pr.maxWeight.reps} reps (${pr.maxWeight.date})`);
+      if (pr.estimated1RM) parts.push(`Est. 1RM: ${pr.estimated1RM.value} lb (${pr.estimated1RM.date})`);
+      if (pr.maxDistance) parts.push(`Max distance: ${pr.maxDistance.value} ${pr.maxDistance.unit} (${pr.maxDistance.date})`);
+      return parts.length ? `${name}: ${parts.join(', ')}` : null;
+    }).filter(Boolean).join('\n') || 'None';
+
+    const systemInstructions = {
+      weekly: 'Generate a weekly training summary. Cover: total workouts, volume trends, notable lifts, PRs hit, body weight change. Where Garmin data is present, use it to contextualize performance (e.g. low body battery or poor sleep on heavy lift days). End with 2-3 specific actionable recommendations for next week.',
+      block: 'Generate a full training block review. Cover: total workouts completed, strength progression per key exercise, PRs achieved, body weight trend, adherence to template. Where Garmin data is present, note recovery patterns across the block. End with recommendations for the next block.',
+      recovery: 'Generate a recovery and readiness analysis. Use Garmin metrics (sleep, body battery, stress, resting HR, steps) correlated with training load per day to identify fatigue patterns, insufficient recovery, or overtraining. Be specific — cite the dates and numbers. Suggest concrete adjustments.',
+      supplement: "Analyze workout performance patterns alongside the user's supplement and medication protocol. Look for correlations between workout notes, performance dips/peaks, Garmin stress/recovery data, and the health context. Identify patterns over time. Be specific and cite dates where relevant.",
+    };
+
+    let workoutSection = '';
+    let bwSection = '';
+    let prSection = '';
+    let garminRestSection = null;
+    const cutoffByType = { weekly: cutoff7, block: null, recovery: cutoff14, supplement: cutoff30 };
+    const cutoff = cutoffByType[reportType];
+
+    const logs = reportType === 'block'
+      ? Object.fromEntries(Object.entries(workoutLogs).filter(([k]) => k.startsWith(`block${currentBlock}-`)))
+      : filterLogs(cutoff);
+
+    workoutSection = formatLogs(logs);
+    bwSection = formatBodyWeight(cutoff || '2000-01-01');
+    const exNames = [...new Set(Object.values(logs).flatMap(l => l.exercises.map(e => e.name)))];
+    prSection = formatPRs(exNames);
+    garminRestSection = formatGarminSummary(cutoff || '2000-01-01');
+
+    const userMessage = [
+      healthContext ? `## Health Context (Supplements / Medications / Notes)\n${healthContext}` : '',
+      `## Workout Data${hasGarmin ? ' (with Garmin health metrics per day)' : ''}\n${workoutSection || 'No workout data for this period.'}`,
+      garminRestSection ? `## Garmin Data — Rest Days\n${garminRestSection}` : '',
+      `## Personal Records\n${prSection}`,
+      `## Body Weight\n${bwSection}`,
+      // Include raw text as fallback if CSV parse produced no date matches (e.g. user pasted free text)
+      (!hasGarmin && rawGarminText) ? `## Additional Health Notes\n${rawGarminText}` : '',
+    ].filter(Boolean).join('\n\n');
+
+    return { systemInstruction: systemInstructions[reportType], userMessage };
+  };
+
+  // Call Anthropic API with streaming to generate a health report
+  const generateReport = async (reportType) => {
+    const storedKey = sessionStorage.getItem('anthropic-api-key') || apiKey;
+    if (!storedKey.trim()) {
+      setReportError(prev => ({ ...prev, [reportType]: 'No API key set. Open Settings (⚙) to add your Anthropic API key.' }));
+      return;
+    }
+    setReportLoading(prev => ({ ...prev, [reportType]: true }));
+    setReportError(prev => ({ ...prev, [reportType]: null }));
+    setReportResults(prev => ({ ...prev, [reportType]: '' }));
+
+    try {
+      const { systemInstruction, userMessage } = buildReportPrompt(reportType, garminText[reportType] || '');
+      const response = await fetch('https://api.anthropic.com/v1/messages', {
+        method: 'POST',
+        headers: {
+          'x-api-key': storedKey.trim(),
+          'anthropic-version': '2023-06-01',
+          'content-type': 'application/json',
+          'anthropic-dangerous-direct-browser-calls': 'true',
+        },
+        body: JSON.stringify({
+          model: 'claude-sonnet-4-6',
+          max_tokens: 2048,
+          stream: true,
+          system: `You are a health and fitness analyst helping review training and wellness data. Be specific, actionable, and concise. Use markdown formatting.\n\n${systemInstruction}`,
+          messages: [{ role: 'user', content: userMessage }],
+        }),
+      });
+
+      if (!response.ok) {
+        const err = await response.json().catch(() => ({}));
+        throw new Error(err?.error?.message || `API error ${response.status}`);
+      }
+
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let accumulated = '';
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        const chunk = decoder.decode(value);
+        const lines = chunk.split('\n');
+        for (const line of lines) {
+          if (line.startsWith('data: ')) {
+            const data = line.slice(6);
+            if (data === '[DONE]') continue;
+            try {
+              const parsed = JSON.parse(data);
+              if (parsed.type === 'content_block_delta' && parsed.delta?.text) {
+                accumulated += parsed.delta.text;
+                setReportResults(prev => ({ ...prev, [reportType]: accumulated }));
+              }
+            } catch { /* skip malformed lines */ }
+          }
+        }
+      }
+    } catch (err) {
+      setReportError(prev => ({ ...prev, [reportType]: err.message }));
+    } finally {
+      setReportLoading(prev => ({ ...prev, [reportType]: false }));
+    }
+  };
+
   const exportData = () => {
     const data = {
       workoutLogs,
@@ -1262,6 +1561,24 @@ const WorkoutTracker = () => {
     return history.length > 0 ? history[0] : null;
   };
 
+  // Returns true if exercise sets contain any entered data (guards type-switch data loss)
+  const setsHaveData = (sets, type) => {
+    if (!sets || sets.length === 0) return false;
+    return sets.some(s => {
+      if (type === 'cardio') return (s.distance && String(s.distance).trim()) || (s.time && String(s.time).trim());
+      if (type === 'tabata') return s.rounds && String(s.rounds).trim();
+      if (type === 'bodyweight') return (s.reps && String(s.reps).trim()) || (s.holdTime && String(s.holdTime).trim());
+      return (s.weight && String(s.weight).trim()) || (s.reps && String(s.reps).trim());
+    });
+  };
+
+  // Parse first number from a reps string like "8-12" or "6" for pre-filling set inputs
+  const parseTargetReps = (repsStr) => {
+    if (!repsStr) return '';
+    const match = String(repsStr).match(/\d+/);
+    return match ? match[0] : '';
+  };
+
   const compareSetToPrevious = (currentSet, previousSets, setIndex) => {
     if (!previousSets || !previousSets[setIndex]) return null;
     const prevSet = previousSets[setIndex];
@@ -1288,6 +1605,13 @@ const WorkoutTracker = () => {
         <div className="flex items-center justify-between">
           <p className="text-gray-400 text-sm md:text-base">Periodized training with progression tracking</p>
           <div className="flex items-center gap-2">
+            <button
+              onClick={() => setShowSettingsModal(true)}
+              className="p-1.5 bg-gray-700 hover:bg-gray-600 text-gray-300 rounded"
+              title="App Settings (API key, health context)"
+            >
+              <Settings className="w-4 h-4" />
+            </button>
             {!authLoading && supabase && (
               user ? (
                 <div className="flex items-center gap-2">
@@ -2053,6 +2377,127 @@ const WorkoutTracker = () => {
                 </div>
               </div>
             )}
+
+            {/* AI Health Reports */}
+            <div className="bg-gray-800 p-4 md:p-6 rounded-lg border border-gray-700">
+              <div className="flex items-center justify-between mb-4">
+                <h3 className="font-semibold text-gray-100 flex items-center gap-2">
+                  <TrendingUp className="w-5 h-5 text-purple-400" />
+                  AI Health Reports
+                </h3>
+                {!sessionStorage.getItem('anthropic-api-key') && (
+                  <button
+                    onClick={() => setShowSettingsModal(true)}
+                    className="text-xs text-purple-400 hover:text-purple-300 underline"
+                  >
+                    Set API key →
+                  </button>
+                )}
+              </div>
+              <div className="space-y-4">
+                {[
+                  { key: 'weekly', label: 'Weekly Summary', description: 'Last 7 days — volume, PRs, body weight change, and recommendations', color: 'emerald', needsGarmin: false },
+                  { key: 'block', label: 'Block-End Review', description: `Full Block ${currentBlock} — strength progression, PRs achieved, body weight trend, next-block recommendations`, color: 'blue', needsGarmin: false },
+                  { key: 'recovery', label: 'Recovery & Readiness', description: 'Last 14 days — training load vs. Garmin sleep/HR/stress data to flag overtraining', color: 'orange', needsGarmin: true },
+                  { key: 'supplement', label: 'Supplement Check-in', description: 'Last 30 days — correlate workout notes and performance with your supplement/medication protocol', color: 'violet', needsGarmin: false },
+                ].map(({ key, label, description, color, needsGarmin }) => {
+                  const colorClasses = {
+                    emerald: { border: 'border-emerald-800/40', bg: 'bg-emerald-950/20', btn: 'bg-emerald-700 hover:bg-emerald-600', label: 'text-emerald-300' },
+                    blue: { border: 'border-blue-800/40', bg: 'bg-blue-950/20', btn: 'bg-blue-700 hover:bg-blue-600', label: 'text-blue-300' },
+                    orange: { border: 'border-orange-800/40', bg: 'bg-orange-950/20', btn: 'bg-orange-700 hover:bg-orange-600', label: 'text-orange-300' },
+                    violet: { border: 'border-violet-800/40', bg: 'bg-violet-950/20', btn: 'bg-violet-700 hover:bg-violet-600', label: 'text-violet-300' },
+                  }[color];
+                  const isLoading = reportLoading[key];
+                  const result = reportResults[key];
+                  const error = reportError[key];
+
+                  return (
+                    <div key={key} className={`p-4 rounded-lg border ${colorClasses.border} ${colorClasses.bg}`}>
+                      <div className="flex items-start justify-between gap-3 mb-2">
+                        <div>
+                          <h4 className={`font-medium text-sm ${colorClasses.label}`}>{label}</h4>
+                          <p className="text-xs text-gray-400 mt-0.5">{description}</p>
+                        </div>
+                        <button
+                          onClick={() => generateReport(key)}
+                          disabled={isLoading}
+                          className={`shrink-0 px-3 py-1.5 text-xs font-medium text-white rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed ${colorClasses.btn}`}
+                        >
+                          {isLoading ? 'Generating...' : result ? 'Regenerate' : 'Generate'}
+                        </button>
+                      </div>
+
+                      {/* Garmin upload */}
+                      <div className="mt-2">
+                        <label className="text-xs text-gray-500 block mb-1">
+                          {needsGarmin ? 'Garmin data (required for best results):' : 'Garmin data (optional):'}
+                        </label>
+                        <div className="flex gap-2">
+                          <label className="text-xs px-2 py-1 bg-gray-700 hover:bg-gray-600 text-gray-300 rounded cursor-pointer">
+                            Upload CSV
+                            <input
+                              type="file"
+                              accept=".csv,.txt"
+                              className="hidden"
+                              onChange={async (e) => {
+                                const file = e.target.files[0];
+                                if (!file) return;
+                                const text = await file.text();
+                                setGarminText(prev => ({ ...prev, [key]: text }));
+                              }}
+                            />
+                          </label>
+                          {garminText[key] && (() => {
+                            const parsed = parseGarminToDateMap(garminText[key]);
+                            const dayCount = Object.keys(parsed).length;
+                            return (
+                              <span className="text-xs text-emerald-400 self-center">
+                                {dayCount > 0 ? `✓ ${dayCount} days parsed` : '✓ Loaded (free-text)'}
+                              </span>
+                            );
+                          })()}
+                        </div>
+                        <textarea
+                          rows={2}
+                          placeholder="Or paste Garmin stats here (sleep, HR, steps, stress...)"
+                          value={garminText[key] || ''}
+                          onChange={e => setGarminText(prev => ({ ...prev, [key]: e.target.value }))}
+                          className="mt-1 w-full px-2 py-1.5 bg-gray-700 border border-gray-600 rounded text-gray-300 text-xs resize-none focus:outline-none focus:border-gray-500"
+                        />
+                      </div>
+
+                      {error && (
+                        <p className="mt-2 text-xs text-red-400 bg-red-950/30 border border-red-800/30 rounded p-2">{error}</p>
+                      )}
+
+                      {result && (
+                        <div className="mt-3">
+                          <div className="flex items-center justify-between mb-1">
+                            <span className="text-xs text-gray-400">Report</span>
+                            <button
+                              onClick={() => navigator.clipboard.writeText(result)}
+                              className="text-xs text-gray-400 hover:text-gray-200 underline"
+                            >
+                              Copy
+                            </button>
+                          </div>
+                          <div className="bg-gray-900/60 border border-gray-700 rounded-lg p-3 text-xs text-gray-200 whitespace-pre-wrap max-h-96 overflow-y-auto leading-relaxed">
+                            {result}
+                          </div>
+                        </div>
+                      )}
+
+                      {isLoading && !result && (
+                        <div className="mt-3 flex items-center gap-2 text-xs text-gray-400">
+                          <div className="w-3 h-3 border-2 border-gray-500 border-t-purple-400 rounded-full animate-spin" />
+                          Generating report...
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
           </div>
         )}
 
@@ -2578,16 +3023,18 @@ const WorkoutTracker = () => {
                             const pctWeight = (ex.percentage && exType === 'strength')
                               ? getPercentageWeight(tmLookup, ex.percentage)
                               : null;
+                            const targetReps = parseTargetReps(ex.reps);
                             return {
                               name: ex.name,
                               type: exType,
                               technique: ex.technique,
                               templateTarget: (ex.sets && ex.reps) ? `${ex.sets}×${ex.reps}` : null,
                               templatePercentage: ex.percentage || null,
+                              templateReps: ex.reps || null,
                               tmLink: ex.tmLink || null,
                               sets: Array(parseInt(ex.sets) || 3).fill(null).map(() => ({
                                 weight: pctWeight ? String(pctWeight) : '',
-                                reps: '',
+                                reps: targetReps,
                                 weightSource: pctWeight ? 'tm-pct' : 'manual'
                               })),
                               notes: ''
@@ -2677,24 +3124,86 @@ const WorkoutTracker = () => {
                 <button
                   onClick={() => {
                     const workout = getCurrentTemplate()[selectedDay];
-                    setExercises(workout?.exercises.map(ex => ({
-                      name: ex.name,
-                      technique: ex.technique,
-                      sets: Array(parseInt(ex.sets) || 3).fill(null).map(() => ({
-                        weight: '',
-                        reps: ''
-                      })),
-                      notes: ''
-                    })) || []);
+                    setExercises(workout?.exercises.map(ex => {
+                      const exType = ex.type || 'strength';
+                      const tmLookup = ex.tmLink || ex.name;
+                      const pctWeight = (ex.percentage && exType === 'strength') ? getPercentageWeight(tmLookup, ex.percentage) : null;
+                      const targetReps = parseTargetReps(ex.reps);
+                      return {
+                        name: ex.name,
+                        type: exType,
+                        technique: ex.technique,
+                        templateTarget: (ex.sets && ex.reps) ? `${ex.sets}×${ex.reps}` : null,
+                        templatePercentage: ex.percentage || null,
+                        templateReps: ex.reps || null,
+                        tmLink: ex.tmLink || null,
+                        sets: Array(parseInt(ex.sets) || 3).fill(null).map(() => ({
+                          weight: pctWeight ? String(pctWeight) : '',
+                          reps: targetReps,
+                          weightSource: pctWeight ? 'tm-pct' : 'manual'
+                        })),
+                        notes: ''
+                      };
+                    }) || []);
                     setPrefilled(false);
                   }}
                   className="text-xs text-purple-400 hover:text-purple-300 underline"
                   title="Clear pre-filled data and start from template"
                 >
-                  Clear
+                  Use Template
                 </button>
               </div>
             )}
+            {(() => {
+              const prevWeekKey = currentWeek > 1 ? `block${currentBlock}-week${currentWeek - 1}-${selectedDay}` : null;
+              const prevWeekLog = prevWeekKey ? workoutLogs[prevWeekKey] : null;
+              if (!prefilled && prevWeekLog && prevWeekLog.exercises?.length > 0) {
+                const templateExercises = getCurrentTemplate()[selectedDay]?.exercises || [];
+                return (
+                  <div className="flex items-center justify-between p-3 bg-blue-950/30 border border-blue-800/50 rounded-lg">
+                    <div className="flex items-center gap-2">
+                      <History className="w-4 h-4 text-blue-400" />
+                      <span className="text-sm text-blue-300">
+                        Last week available — load Week {currentWeek - 1} sets?
+                      </span>
+                    </div>
+                    <button
+                      onClick={() => {
+                        setExercises(prevWeekLog.exercises.map(ex => {
+                          const exType = ex.type || 'strength';
+                          const tmplEx = templateExercises.find(t => t.name === ex.name);
+                          return {
+                            name: ex.name,
+                            type: exType,
+                            technique: ex.technique,
+                            templateTarget: tmplEx ? `${tmplEx.sets}×${tmplEx.reps}` : null,
+                            templatePercentage: tmplEx?.percentage || null,
+                            templateReps: tmplEx?.reps || null,
+                            tmLink: tmplEx?.tmLink || null,
+                            sets: ex.sets.map(s =>
+                              exType === 'bodyweight'
+                                ? { reps: s.reps || '', holdTime: s.holdTime || '' }
+                                : exType === 'cardio'
+                                  ? { distance: s.distance || '', time: s.time || '', unit: s.unit || 'miles' }
+                                  : exType === 'tabata'
+                                    ? { rounds: s.rounds || '', workSeconds: s.workSeconds || '20', restSeconds: s.restSeconds || '10', calories: s.calories || '' }
+                                    : { weight: s.weight || '', reps: s.reps || '' }
+                            ),
+                            notes: ex.notes || ''
+                          };
+                        }));
+                        setPrefilled(true);
+                      }}
+                      className="text-xs text-blue-400 hover:text-blue-300 underline shrink-0"
+                      title="Load exact sets and weights from last week"
+                    >
+                      Load Last Week
+                    </button>
+                  </div>
+                );
+              }
+              return null;
+            })()}
 
             <div className="space-y-4">
               {exercises.map((exercise, exIdx) => {
@@ -2841,91 +3350,84 @@ const WorkoutTracker = () => {
                     </div>
 
                     {/* Exercise Type Toggle */}
-                    <div className="flex items-center gap-2 mb-3">
+                    <div className="flex items-center gap-2 mb-1">
                       <span className="text-xs text-gray-400">Type:</span>
-                      <button
-                        onClick={() => {
-                          const newExercises = [...exercises];
-                          newExercises[exIdx].type = 'strength';
-                          // Convert sets to strength format
-                          newExercises[exIdx].sets = newExercises[exIdx].sets.map(() => ({
-                            weight: '',
-                            reps: ''
-                          }));
-                          setExercises(newExercises);
-                        }}
-                        className={`px-3 py-1 rounded text-xs font-medium transition-colors ${
-                          (exercise.type || 'strength') === 'strength'
-                            ? 'bg-emerald-600 text-white'
-                            : 'bg-gray-600 text-gray-300 hover:bg-gray-500'
-                        }`}
-                        title="Track weight and reps"
-                      >
-                        Strength
-                      </button>
-                      <button
-                        onClick={() => {
-                          const newExercises = [...exercises];
-                          newExercises[exIdx].type = 'cardio';
-                          // Convert sets to cardio format
-                          newExercises[exIdx].sets = newExercises[exIdx].sets.map(() => ({
-                            distance: '',
-                            time: '',
-                            unit: 'miles'
-                          }));
-                          setExercises(newExercises);
-                        }}
-                        className={`px-3 py-1 rounded text-xs font-medium transition-colors ${
-                          exercise.type === 'cardio'
-                            ? 'bg-blue-600 text-white'
-                            : 'bg-gray-600 text-gray-300 hover:bg-gray-500'
-                        }`}
-                        title="Track distance and time"
-                      >
-                        Cardio
-                      </button>
-                      <button
-                        onClick={() => {
-                          const newExercises = [...exercises];
-                          newExercises[exIdx].type = 'tabata';
-                          // Convert sets to tabata format
-                          newExercises[exIdx].sets = newExercises[exIdx].sets.map(() => ({
-                            rounds: '',
-                            workSeconds: '20',
-                            restSeconds: '10',
-                            calories: ''
-                          }));
-                          setExercises(newExercises);
-                        }}
-                        className={`px-3 py-1 rounded text-xs font-medium transition-colors ${
-                          exercise.type === 'tabata'
-                            ? 'bg-orange-600 text-white'
-                            : 'bg-gray-600 text-gray-300 hover:bg-gray-500'
-                        }`}
-                        title="Track interval rounds"
-                      >
-                        Tabata
-                      </button>
-                      <button
-                        onClick={() => {
-                          const newExercises = [...exercises];
-                          newExercises[exIdx].type = 'bodyweight';
-                          newExercises[exIdx].sets = newExercises[exIdx].sets.map(() => ({
-                            reps: '',
-                            holdTime: ''
-                          }));
-                          setExercises(newExercises);
-                        }}
-                        className={`px-3 py-1 rounded text-xs font-medium transition-colors ${
-                          exercise.type === 'bodyweight'
-                            ? 'bg-violet-600 text-white'
-                            : 'bg-gray-600 text-gray-300 hover:bg-gray-500'
-                        }`}
-                        title="Track reps and hold time for bodyweight exercises"
-                      >
-                        Bodyweight
-                      </button>
+                      {[
+                        { key: 'strength', label: 'Strength', activeClass: 'bg-emerald-600 text-white', title: 'Track weight and reps' },
+                        { key: 'cardio', label: 'Cardio', activeClass: 'bg-blue-600 text-white', title: 'Track distance and time' },
+                        { key: 'tabata', label: 'Tabata', activeClass: 'bg-orange-600 text-white', title: 'Track interval rounds' },
+                        { key: 'bodyweight', label: 'Bodyweight', activeClass: 'bg-violet-600 text-white', title: 'Track reps and hold time' },
+                      ].map(({ key, label, activeClass, title }) => {
+                        const currentType = exercise.type || 'strength';
+                        const isActive = currentType === key;
+                        return (
+                          <button
+                            key={key}
+                            onClick={() => {
+                              if (isActive) return;
+                              if (setsHaveData(exercise.sets, currentType)) {
+                                const newExercises = [...exercises];
+                                newExercises[exIdx].pendingTypeChange = key;
+                                setExercises(newExercises);
+                              } else {
+                                const newExercises = [...exercises];
+                                newExercises[exIdx].type = key;
+                                newExercises[exIdx].pendingTypeChange = null;
+                                newExercises[exIdx].sets = key === 'cardio'
+                                  ? [{ distance: '', time: '', unit: 'miles' }]
+                                  : key === 'tabata'
+                                    ? [{ rounds: '', workSeconds: '20', restSeconds: '10', calories: '' }]
+                                    : key === 'bodyweight'
+                                      ? [{ reps: '', holdTime: '' }]
+                                      : [{ weight: '', reps: '' }];
+                                setExercises(newExercises);
+                              }
+                            }}
+                            className={`px-3 py-1 rounded text-xs font-medium transition-colors ${isActive ? activeClass : 'bg-gray-600 text-gray-300 hover:bg-gray-500'}`}
+                            title={title}
+                          >
+                            {label}
+                          </button>
+                        );
+                      })}
                     </div>
+                    {exercise.pendingTypeChange && (
+                      <div className="mb-3 mt-2 p-2 bg-orange-950/40 border border-orange-700/50 rounded-lg flex items-center justify-between gap-3">
+                        <span className="text-xs text-orange-300">Switching type will clear {exercise.sets.length} set{exercise.sets.length !== 1 ? 's' : ''}. Continue?</span>
+                        <div className="flex gap-2 shrink-0">
+                          <button
+                            onClick={() => {
+                              const newType = exercise.pendingTypeChange;
+                              const newExercises = [...exercises];
+                              newExercises[exIdx].type = newType;
+                              newExercises[exIdx].pendingTypeChange = null;
+                              newExercises[exIdx].sets = newType === 'cardio'
+                                ? [{ distance: '', time: '', unit: 'miles' }]
+                                : newType === 'tabata'
+                                  ? [{ rounds: '', workSeconds: '20', restSeconds: '10', calories: '' }]
+                                  : newType === 'bodyweight'
+                                    ? [{ reps: '', holdTime: '' }]
+                                    : [{ weight: '', reps: '' }];
+                              setExercises(newExercises);
+                            }}
+                            className="text-xs px-2 py-1 bg-orange-700 hover:bg-orange-600 text-white rounded"
+                          >
+                            Confirm
+                          </button>
+                          <button
+                            onClick={() => {
+                              const newExercises = [...exercises];
+                              newExercises[exIdx].pendingTypeChange = null;
+                              setExercises(newExercises);
+                            }}
+                            className="text-xs px-2 py-1 bg-gray-600 hover:bg-gray-500 text-gray-300 rounded"
+                          >
+                            Cancel
+                          </button>
+                        </div>
+                      </div>
+                    )}
+                    {!exercise.pendingTypeChange && <div className="mb-3" />}
 
                     {/* Previous Session Banner */}
                     {previousSession && (
@@ -3263,7 +3765,7 @@ const WorkoutTracker = () => {
                           } else {
                             newExercises[exIdx].sets.push({
                               weight: lastSet?.weight || '',
-                              reps: lastSet?.reps || ''
+                              reps: lastSet?.reps || parseTargetReps(exercise.templateReps) || ''
                             });
                           }
                           setExercises(newExercises);
@@ -3478,7 +3980,7 @@ const WorkoutTracker = () => {
                 });
 
                 // Save workout log — strip UI-only metadata before persisting
-                const exercisesToSave = exercises.map(({ _notesOpen, templateTarget, templatePercentage, ...ex }) => ({
+                const exercisesToSave = exercises.map(({ _notesOpen, templateTarget, templatePercentage, pendingTypeChange, templateReps, ...ex }) => ({
                   ...ex,
                   sets: ex.sets.map(({ weightSource, ...set }) => set)
                 }));
@@ -3562,20 +4064,20 @@ const WorkoutTracker = () => {
                           {pr.value} lb (from {pr.weight} lb × {pr.reps} reps)
                           {pr.previous > 0 && ` (previous: ${pr.previous} lb)`}
                         </p>
-                        <button
-                          onClick={() => {
-                            setTmModalExercise(pr.exerciseName);
-                            setTmModalIsNew(!trainingMaxes[pr.exerciseName]);
-                            setTmModalTrueRM(String(pr.value));
-                            setTmModalPercent(String(trainingMaxes[pr.exerciseName]?.trainingMaxPercent || 90));
-                            setTmModalCalcWeight('');
-                            setTmModalCalcReps('');
-                            setShowTMModal(true);
-                          }}
-                          className="mt-2 text-xs text-purple-400 hover:text-purple-300 underline"
-                        >
-                          Use as Training Max
-                        </button>
+                        {prTMSaved[idx] ? (
+                          <p className="mt-2 text-xs text-purple-300">✓ Saved as Training Max ({trainingMaxes[pr.exerciseName]?.trainingMaxPercent || 90}%)</p>
+                        ) : (
+                          <button
+                            onClick={() => {
+                              const existingPct = trainingMaxes[pr.exerciseName]?.trainingMaxPercent || 90;
+                              saveTrainingMax(pr.exerciseName, pr.value, existingPct);
+                              setPrTMSaved(prev => ({ ...prev, [idx]: true }));
+                            }}
+                            className="mt-2 text-xs text-purple-400 hover:text-purple-300 underline"
+                          >
+                            Use as Training Max
+                          </button>
+                        )}
                       </>
                     )}
                     {pr.type === 'maxDistance' && (
@@ -3650,6 +4152,7 @@ const WorkoutTracker = () => {
               onClick={() => {
                 setShowPRModal(false);
                 setNewPRs([]);
+                setPrTMSaved({});
                 setPrefilled(false);
                 setView('calendar');
               }}
@@ -3877,6 +4380,89 @@ const WorkoutTracker = () => {
               >
                 Save Training Max
               </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Settings Modal */}
+      {showSettingsModal && (
+        <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-50 p-4">
+          <div className="bg-gray-800 border border-gray-700 rounded-xl p-6 max-w-lg w-full">
+            <div className="flex justify-between items-center mb-4">
+              <h2 className="text-xl font-bold text-gray-100 flex items-center gap-2">
+                <Settings className="w-5 h-5 text-gray-400" />
+                App Settings
+              </h2>
+              <button onClick={() => { setShowSettingsModal(false); setSettingsSaved(false); }} className="text-gray-400 hover:text-gray-200">
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <div className="space-y-5">
+              <div>
+                <label className="text-sm font-medium text-gray-200 block mb-1">Anthropic API Key</label>
+                {sessionStorage.getItem('anthropic-api-key') && !apiKey ? (
+                  <div className="flex items-center justify-between px-3 py-2 bg-gray-700/50 border border-emerald-700/50 rounded-lg">
+                    <span className="text-sm text-emerald-400">✓ Key active for this session</span>
+                    <button
+                      onClick={() => { sessionStorage.removeItem('anthropic-api-key'); setApiKey(''); setSettingsSaved(false); }}
+                      className="text-xs text-red-400 hover:text-red-300"
+                    >
+                      Clear
+                    </button>
+                  </div>
+                ) : (
+                  <input
+                    type="password"
+                    placeholder="sk-ant-..."
+                    value={apiKey}
+                    onChange={e => setApiKey(e.target.value)}
+                    className="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded-lg text-gray-100 text-sm font-mono focus:outline-none focus:border-purple-500"
+                    autoComplete="off"
+                    autoCorrect="off"
+                    spellCheck={false}
+                  />
+                )}
+                <p className="text-xs text-gray-500 mt-1">Stored in session memory only — never written to disk. Clears automatically when you close this tab.</p>
+              </div>
+
+              <div>
+                <label className="text-sm font-medium text-gray-200 block mb-1">Health Context</label>
+                <textarea
+                  rows={6}
+                  placeholder={"Supplements:\n- Creatine 5g daily\n- Vitamin D 2000 IU\n\nMedications:\n- ...\n\nNotes:\n- ..."}
+                  value={healthContext}
+                  onChange={e => setHealthContext(e.target.value)}
+                  className="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded-lg text-gray-100 text-sm resize-none focus:outline-none focus:border-purple-500"
+                />
+                <p className="text-xs text-gray-500 mt-1">Supplements, medications, and health notes included in AI reports.</p>
+              </div>
+
+              {settingsSaved && (
+                <p className="text-sm text-emerald-400">✓ Settings saved</p>
+              )}
+
+              <div className="flex gap-3">
+                <button
+                  onClick={() => { setShowSettingsModal(false); setSettingsSaved(false); }}
+                  className="flex-1 px-4 py-2 bg-gray-700 hover:bg-gray-600 text-gray-300 rounded-lg text-sm"
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={() => {
+                    if (apiKey.trim()) sessionStorage.setItem('anthropic-api-key', apiKey.trim());
+                    localStorage.setItem('health-context', healthContext);
+                    setSettingsSaved(true);
+                    setApiKey(''); // clear from React state after saving to session — not kept in memory
+                    setTimeout(() => setSettingsSaved(false), 2500);
+                  }}
+                  className="flex-1 px-4 py-2 bg-purple-600 hover:bg-purple-500 text-white rounded-lg text-sm font-medium"
+                >
+                  Save Settings
+                </button>
+              </div>
             </div>
           </div>
         </div>
