@@ -167,7 +167,7 @@ Logged in:   React State ←→ localStorage (cache) + Supabase (cloud, debounce
 - Color coding:
   - **Emerald (green)**: Strength, improvements, success, new block button
   - **Blue**: Cardio, matched performance, cloud sync
-  - **Orange**: Tabata/HIIT, body weight
+  - **Orange**: Tabata/HIIT
   - **Purple**: Training maxes, TM% badges, TM modal
   - **Violet/Purple**: Bodyweight exercises
   - **Red**: Deletions, decreases
@@ -181,7 +181,6 @@ Logged in:   React State ←→ localStorage (cache) + Supabase (cloud, debounce
 
 ### localStorage Keys (always used as cache)
 - `workout-logs`: All workout session data (all blocks)
-- `weekly-metrics`: Body weight and weekly stats (all blocks)
 - `workout-blocks`: Training block template (single shared template)
 - `personal-records`: All personal records (global, not block-specific)
 - `current-block`: Active block number (integer)
@@ -193,7 +192,6 @@ Logged in:   React State ←→ localStorage (cache) + Supabase (cloud, debounce
 |--------|------|---------|
 | id | UUID (FK to auth.users) | User identity |
 | workout_logs | JSONB | All workout sessions (all blocks) |
-| weekly_metrics | JSONB | Body weight / stats (all blocks) |
 | blocks | JSONB | Training template (shared) |
 | personal_records | JSONB | PR tracking (global) |
 | current_block | INTEGER | Active block number |
@@ -236,6 +234,5 @@ npm run preview # Preview production build
 - Previous session data shown inline while logging (blue banner per exercise with last session date + sets)
 - Fuzzy search enabled for exercise name matching
 - Auth supports email/password only (Google OAuth removed)
-- Body weight chart sorts by `blockNum * 1000 + weekNum` for correct cross-block ordering; X-axis labels use `B1W3` format
 - Training max weights are rounded to nearest 2.5 lb (`roundToNearest2_5`)
 - Internal set fields (`weightSource`, `_notesOpen`, `templateTarget`) are stripped before saving logs

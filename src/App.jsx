@@ -64,7 +64,6 @@ const WorkoutTracker = () => {
   ]);
 
   const [workoutLogs, setWorkoutLogs] = useState({});
-  const [weeklyMetrics, setWeeklyMetrics] = useState({});
   const [dataLoaded, setDataLoaded] = useState(false);
 
 
@@ -262,17 +261,14 @@ const WorkoutTracker = () => {
   const loadFromLocalStorage = () => {
     try {
       const logs = localStorage.getItem('workout-logs');
-      const metrics = localStorage.getItem('weekly-metrics');
       const savedBlocks = localStorage.getItem('workout-blocks');
       const savedPRs = localStorage.getItem('personal-records');
       const savedCurrentBlock = localStorage.getItem('current-block');
       const savedBlockMetadata = localStorage.getItem('block-metadata');
 
       const parsedLogs = logs ? JSON.parse(logs) : {};
-      const parsedMetrics = metrics ? JSON.parse(metrics) : {};
 
       setWorkoutLogs(parsedLogs);
-      setWeeklyMetrics(parsedMetrics);
       if (savedBlocks) setBlocks(JSON.parse(savedBlocks));
 
       if (savedCurrentBlock) setCurrentBlock(parseInt(savedCurrentBlock) || 1);
@@ -311,7 +307,6 @@ const WorkoutTracker = () => {
   const loadFromCloud = (data) => {
     const parsedLogs = data.workout_logs || {};
     setWorkoutLogs(parsedLogs);
-    setWeeklyMetrics(data.weekly_metrics || {});
     if (data.blocks && Array.isArray(data.blocks)) setBlocks(data.blocks);
 
     if (data.current_block) setCurrentBlock(data.current_block);
@@ -343,7 +338,6 @@ const WorkoutTracker = () => {
     // Cache in localStorage
     try {
       localStorage.setItem('workout-logs', JSON.stringify(parsedLogs));
-      localStorage.setItem('weekly-metrics', JSON.stringify(data.weekly_metrics || {}));
       localStorage.setItem('workout-blocks', JSON.stringify(data.blocks || []));
       localStorage.setItem('personal-records', JSON.stringify(data.personal_records || {}));
       if (data.current_block) localStorage.setItem('current-block', JSON.stringify(data.current_block));
@@ -414,16 +408,6 @@ const WorkoutTracker = () => {
   React.useEffect(() => {
     if (dataLoaded) {
       try {
-        localStorage.setItem('weekly-metrics', JSON.stringify(weeklyMetrics));
-      } catch (error) {
-        console.error('Error saving:', error);
-      }
-    }
-  }, [weeklyMetrics, dataLoaded]);
-
-  React.useEffect(() => {
-    if (dataLoaded) {
-      try {
         localStorage.setItem('workout-blocks', JSON.stringify(blocks));
       } catch (error) {
         console.error('Error saving:', error);
@@ -486,7 +470,6 @@ const WorkoutTracker = () => {
           .upsert({
             id: user.id,
             workout_logs: workoutLogs,
-            weekly_metrics: weeklyMetrics,
             blocks: blocks,
             personal_records: personalRecords,
             current_block: currentBlock,
@@ -499,7 +482,7 @@ const WorkoutTracker = () => {
         console.error('Error saving to Supabase:', error);
       }
     }, 1000);
-  }, [user, workoutLogs, weeklyMetrics, blocks, personalRecords, currentBlock, blockMetadata, trainingMaxes, dataLoaded]);
+  }, [user, workoutLogs, blocks, personalRecords, currentBlock, blockMetadata, trainingMaxes, dataLoaded]);
 
   // Trigger Supabase sync when data changes
   React.useEffect(() => {
@@ -1066,7 +1049,6 @@ const WorkoutTracker = () => {
   const exportData = () => {
     const data = {
       workoutLogs,
-      weeklyMetrics,
       blocks,
       personalRecords,
       currentBlock,
@@ -1113,7 +1095,6 @@ const WorkoutTracker = () => {
           return;
         }
         if (data.workoutLogs) setWorkoutLogs(data.workoutLogs);
-        if (data.weeklyMetrics) setWeeklyMetrics(data.weeklyMetrics);
         if (data.blocks) setBlocks(data.blocks);
         if (data.currentBlock) setCurrentBlock(data.currentBlock);
         if (data.blockMetadata) setBlockMetadata(data.blockMetadata);
@@ -1393,86 +1374,6 @@ const WorkoutTracker = () => {
               </div>
             </div>
 
-
-            {/* Weekly Body Weight Tracking */}
-            {(() => {
-              // Get weekly body weight data from weeklyMetrics
-              const weightHistory = Object.entries(weeklyMetrics)
-                .filter(([, data]) => data.bodyWeight && parseFloat(data.bodyWeight) > 0)
-                .map(([key, data]) => {
-                  // Parse block and week from key (e.g., "block2-week3")
-                  const match = key.match(/block(\d+)-week(\d+)/);
-                  const blockNum = match ? parseInt(match[1]) : 0;
-                  const weekNum = match ? parseInt(match[2]) : 0;
-                  return {
-                    weekKey: key,
-                    week: weekNum,
-                    blockNum,
-                    sortIndex: blockNum * 1000 + weekNum,
-                    weight: parseFloat(data.bodyWeight),
-                    date: data.lastUpdated || `B${blockNum}W${weekNum}`,
-                    label: `B${blockNum}W${weekNum}`
-                  };
-                })
-                .sort((a, b) => a.sortIndex - b.sortIndex);
-
-              const latestWeight = weightHistory.length > 0 ? weightHistory[weightHistory.length - 1].weight : null;
-              const previousWeight = weightHistory.length > 1 ? weightHistory[weightHistory.length - 2].weight : null;
-              const weightChange = latestWeight && previousWeight ? (latestWeight - previousWeight).toFixed(1) : null;
-              const recentHistory = weightHistory.slice(-14);
-
-              return (
-                <>
-                  {/* Body Weight Stats */}
-                  <div className="bg-gray-800 p-4 rounded-lg border border-gray-700">
-                    <h3 className="font-semibold text-gray-100 mb-4">Weekly Body Weight</h3>
-                    <div className="grid grid-cols-2 gap-4">
-                      <div className="p-4 bg-orange-950/30 border border-orange-900/50 rounded-lg">
-                        <p className="text-sm text-gray-400">Current Weight</p>
-                        <p className="text-3xl font-bold text-orange-400">
-                          {latestWeight ? `${latestWeight}` : '—'}
-                        </p>
-                        <p className="text-xs text-gray-500">lb</p>
-                      </div>
-                      <div className="p-4 bg-gray-700/50 border border-gray-600 rounded-lg">
-                        <p className="text-sm text-gray-400">Weekly Change</p>
-                        <p className={`text-3xl font-bold ${
-                          weightChange && parseFloat(weightChange) > 0
-                            ? 'text-red-400'
-                            : weightChange && parseFloat(weightChange) < 0
-                              ? 'text-emerald-400'
-                              : 'text-gray-400'
-                        }`}>
-                          {weightChange ? `${parseFloat(weightChange) > 0 ? '+' : ''}${weightChange}` : '—'}
-                        </p>
-                        <p className="text-xs text-gray-500">lb vs last week</p>
-                      </div>
-                    </div>
-                  </div>
-
-                  {/* Body Weight Trend Chart */}
-                  {recentHistory.length >= 2 && (
-                    <div className="bg-gray-800 p-4 rounded-lg border border-orange-600/30">
-                      <h3 className="font-semibold text-orange-400 mb-4">Body Weight Trend (By Week)</h3>
-                      <div className="p-4 bg-gray-900/50 rounded-lg border border-gray-600">
-                        <ResponsiveContainer width="100%" height={150}>
-                          <LineChart data={recentHistory.map(h => ({ date: h.label, value: h.weight }))}>
-                            <CartesianGrid strokeDasharray="3 3" stroke="#374151" />
-                            <XAxis dataKey="date" stroke="#9ca3af" tick={{ fill: '#9ca3af', fontSize: 10 }} />
-                            <YAxis stroke="#9ca3af" tick={{ fill: '#9ca3af', fontSize: 10 }} domain={['dataMin - 2', 'dataMax + 2']} />
-                            <Tooltip
-                              contentStyle={{ backgroundColor: '#1f2937', border: '1px solid #374151', borderRadius: '0.5rem', color: '#f3f4f6' }}
-                              formatter={(value) => [`${value} lb`, 'Weight']}
-                            />
-                            <Line type="monotone" dataKey="value" stroke="#fb923c" strokeWidth={2} dot={{ fill: '#fb923c', r: 3 }} />
-                          </LineChart>
-                        </ResponsiveContainer>
-                      </div>
-                    </div>
-                  )}
-                </>
-              );
-            })()}
 
             {/* Training Maxes Panel */}
             <div className="bg-gray-800 p-4 rounded-lg border border-gray-700">
@@ -2405,7 +2306,6 @@ const WorkoutTracker = () => {
                     };
                     setBlocks([defaultTemplate]);
                     setWorkoutLogs({});
-                    setWeeklyMetrics({});
                     setTrainingMaxes({});
                     setCurrentBlock(1);
                     setBlockMetadata({});
@@ -2506,30 +2406,6 @@ const WorkoutTracker = () => {
                     <ChevronRight className="w-5 h-5" />
                   </button>
                 </div>
-              </div>
-            </div>
-
-            <div className="bg-gray-800 p-4 rounded-lg border border-gray-700">
-              <h3 className="text-sm font-medium text-gray-300 mb-3">Week {currentWeek} Metrics</h3>
-              <div>
-                <label className="text-xs text-gray-400 block mb-1">Body Weight (lbs)</label>
-                <input
-                  type="text"
-                  value={weeklyMetrics[`block${currentBlock}-week${currentWeek}`]?.bodyWeight || ''}
-                  onChange={(e) => {
-                    const weekKey = `block${currentBlock}-week${currentWeek}`;
-                    setWeeklyMetrics({
-                      ...weeklyMetrics,
-                      [weekKey]: {
-                        ...weeklyMetrics[weekKey],
-                        bodyWeight: e.target.value,
-                        lastUpdated: new Date().toISOString().split('T')[0]
-                      }
-                    });
-                  }}
-                  placeholder="e.g., 185.5"
-                  className="px-3 py-2 bg-gray-700 border border-gray-600 rounded-lg text-gray-100 w-full"
-                />
               </div>
             </div>
 
