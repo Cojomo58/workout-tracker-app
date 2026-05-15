@@ -271,7 +271,9 @@ const WorkoutTracker = () => {
       setWorkoutLogs(parsedLogs);
       if (savedBlocks) setBlocks(JSON.parse(savedBlocks));
 
-      if (savedCurrentBlock) setCurrentBlock(parseInt(savedCurrentBlock) || 1);
+      const parsedBlock = savedCurrentBlock ? parseInt(savedCurrentBlock) || 1 : 1;
+      setCurrentBlock(parsedBlock);
+      setCurrentWeek(getLastPopulatedWeek(parsedBlock, parsedLogs));
 
       if (savedBlockMetadata) {
         setBlockMetadata(JSON.parse(savedBlockMetadata));
@@ -310,6 +312,7 @@ const WorkoutTracker = () => {
     if (data.blocks && Array.isArray(data.blocks)) setBlocks(data.blocks);
 
     if (data.current_block) setCurrentBlock(data.current_block);
+    setCurrentWeek(getLastPopulatedWeek(data.current_block || 1, parsedLogs));
 
     if (data.block_metadata && Object.keys(data.block_metadata).length > 0) {
       setBlockMetadata(data.block_metadata);
@@ -569,15 +572,23 @@ const WorkoutTracker = () => {
   };
 
   const saveTrainingMax = (exerciseName, true1RM, pct = 90) => {
-    setTrainingMaxes(prev => ({
-      ...prev,
-      [exerciseName]: {
-        true1RM: parseFloat(true1RM),
-        trainingMaxPercent: parseFloat(pct),
-        trainingMax: deriveTrainingMax(true1RM, pct),
-        lastUpdated: new Date().toISOString().split('T')[0]
-      }
-    }));
+    setTrainingMaxes(prev => {
+      const existing = prev[exerciseName];
+      const prevHistory = existing?.history || [];
+      const newHistory = existing
+        ? [...prevHistory, { true1RM: existing.true1RM, trainingMax: existing.trainingMax, date: existing.lastUpdated || new Date().toISOString().split('T')[0] }]
+        : prevHistory;
+      return {
+        ...prev,
+        [exerciseName]: {
+          true1RM: parseFloat(true1RM),
+          trainingMaxPercent: parseFloat(pct),
+          trainingMax: deriveTrainingMax(true1RM, pct),
+          lastUpdated: new Date().toISOString().split('T')[0],
+          history: newHistory
+        }
+      };
+    });
   };
 
   // Rep-to-TM-percentage lookup (standard powerlifting percentage chart)
@@ -1239,6 +1250,14 @@ const WorkoutTracker = () => {
     }, 0);
   };
 
+  const getLastPopulatedWeek = (blockNum, logs) => {
+    const regex = new RegExp(`^block${blockNum}-week(\\d+)-`);
+    const weeks = Object.keys(logs)
+      .map(k => { const m = k.match(regex); return m ? parseInt(m[1]) : null; })
+      .filter(Boolean);
+    return weeks.length > 0 ? Math.max(...weeks) : 1;
+  };
+
   const getPreviousSession = (exerciseName) => {
     const history = getAllExerciseHistory(exerciseName);
     // Get the most recent session (first item in sorted array)
@@ -1410,6 +1429,14 @@ const WorkoutTracker = () => {
                           <span className="text-purple-300 font-medium">TM: {tm.trainingMax} lb</span>
                         </p>
                         <p className="text-xs text-gray-500">Updated {tm.lastUpdated}</p>
+                        {tm.history && tm.history.length > 0 && (
+                          <p className="text-xs text-gray-500 mt-1">
+                            Started: <span className="text-gray-400">{tm.history[0].trainingMax} lb</span>
+                            <span className="text-gray-600"> ({tm.history[0].date})</span>
+                            {' → '}
+                            <span className="text-purple-300 font-medium">{tm.trainingMax} lb now</span>
+                          </p>
+                        )}
                       </div>
                       <button
                         onClick={() => {
@@ -1915,63 +1942,91 @@ const WorkoutTracker = () => {
                   );
                 })()}
 
-                <div className="space-y-3 max-h-96 overflow-y-auto">
-                  {getAllExerciseHistory(selectedExerciseHistory).map((entry, idx) => {
-                    const exerciseType = entry.type || 'strength';
-
-                    return (
-                      <div key={idx} className="p-3 bg-gray-700 rounded-lg border border-gray-600">
-                        <div className="flex items-center justify-between mb-2">
-                          <span className="text-sm font-medium text-gray-100">
-                            {formatDate(entry.date)}
-                          </span>
-                          <span className={`text-xs px-2 py-0.5 rounded ${
-                            exerciseType === 'cardio'
-                              ? 'bg-blue-900/50 text-blue-400'
-                              : exerciseType === 'tabata'
-                                ? 'bg-orange-900/50 text-orange-400'
-                                : exerciseType === 'bodyweight'
-                                  ? 'bg-violet-900/50 text-violet-400'
-                                  : 'bg-emerald-900/50 text-emerald-400'
-                          }`}>
-                            {exerciseType}
-                          </span>
+                {(() => {
+                  const history = getAllExerciseHistory(selectedExerciseHistory);
+                  const exerciseType = history.length > 0 ? (history[0].type || 'strength') : 'strength';
+                  const strengthHistory = exerciseType === 'strength'
+                    ? history.map(e => calculateVolume(e.sets)).filter(v => v > 0)
+                    : [];
+                  const firstVol = strengthHistory.length > 0 ? strengthHistory[strengthHistory.length - 1] : null;
+                  const bestVol = strengthHistory.length > 0 ? Math.max(...strengthHistory) : null;
+                  const volGrowth = firstVol && bestVol && firstVol > 0
+                    ? Math.round((bestVol - firstVol) / firstVol * 100)
+                    : null;
+                  return (
+                    <>
+                      {firstVol !== null && (
+                        <div className="flex items-center gap-3 px-3 py-2 bg-gray-750 border border-gray-700 rounded-lg text-xs text-gray-400 mb-3">
+                          <span>Volume</span>
+                          <span className="text-gray-300">First: <span className="text-white font-medium">{firstVol.toLocaleString()} lbs</span></span>
+                          <span className="text-gray-600">→</span>
+                          <span className="text-gray-300">Best: <span className="text-emerald-400 font-medium">{bestVol.toLocaleString()} lbs</span></span>
+                          {volGrowth !== null && (
+                            <span className={volGrowth >= 0 ? 'text-emerald-400' : 'text-red-400'}>
+                              ({volGrowth >= 0 ? '+' : ''}{volGrowth}%)
+                            </span>
+                          )}
                         </div>
-                        <div className="space-y-1">
-                          {entry.sets && entry.sets.map((set, setIdx) => (
-                            <div key={setIdx} className="text-sm text-gray-300">
-                              {exerciseType === 'cardio' ? (
-                                <>
-                                  Entry {setIdx + 1}: {set.distance ? `${set.distance} ${set.unit || 'mi'} in ${set.time}` : 'Not logged'}
-                                  {set.distance && set.time && (
-                                    <span className="text-cyan-400 ml-2">
-                                      ({calculatePace(parseTimeToSeconds(set.time), parseFloat(set.distance))}/{set.unit === 'km' ? 'km' : 'mi'})
-                                    </span>
-                                  )}
-                                </>
-                              ) : exerciseType === 'tabata' ? (
-                                <>
-                                  Set {setIdx + 1}: {set.rounds ? `${set.rounds} rounds @ ${set.workSeconds || '20'}s/${set.restSeconds || '10'}s${set.calories ? ` • ${set.calories} kcal` : ''}` : 'Not logged'}
-                                </>
-                              ) : exerciseType === 'bodyweight' ? (
-                                <>
-                                  Set {setIdx + 1}: {set.reps || set.holdTime ? `${set.reps ? `${set.reps} reps` : ''}${set.reps && set.holdTime ? ' • ' : ''}${set.holdTime ? `${set.holdTime}s hold` : ''}` : 'Not logged'}
-                                </>
-                              ) : (
-                                <>Set {setIdx + 1}: {set.weight ? `${set.weight} lb × ${set.reps} reps` : 'Not logged'}</>
+                      )}
+                      <div className="space-y-3 max-h-96 overflow-y-auto">
+                        {history.map((entry, idx) => {
+                          const entryType = entry.type || 'strength';
+                          return (
+                            <div key={idx} className="p-3 bg-gray-700 rounded-lg border border-gray-600">
+                              <div className="flex items-center justify-between mb-2">
+                                <span className="text-sm font-medium text-gray-100">
+                                  {formatDate(entry.date)}
+                                </span>
+                                <span className={`text-xs px-2 py-0.5 rounded ${
+                                  entryType === 'cardio'
+                                    ? 'bg-blue-900/50 text-blue-400'
+                                    : entryType === 'tabata'
+                                      ? 'bg-orange-900/50 text-orange-400'
+                                      : entryType === 'bodyweight'
+                                        ? 'bg-violet-900/50 text-violet-400'
+                                        : 'bg-emerald-900/50 text-emerald-400'
+                                }`}>
+                                  {entryType}
+                                </span>
+                              </div>
+                              <div className="space-y-1">
+                                {entry.sets && entry.sets.map((set, setIdx) => (
+                                  <div key={setIdx} className="text-sm text-gray-300">
+                                    {entryType === 'cardio' ? (
+                                      <>
+                                        Entry {setIdx + 1}: {set.distance ? `${set.distance} ${set.unit || 'mi'} in ${set.time}` : 'Not logged'}
+                                        {set.distance && set.time && (
+                                          <span className="text-cyan-400 ml-2">
+                                            ({calculatePace(parseTimeToSeconds(set.time), parseFloat(set.distance))}/{set.unit === 'km' ? 'km' : 'mi'})
+                                          </span>
+                                        )}
+                                      </>
+                                    ) : entryType === 'tabata' ? (
+                                      <>
+                                        Set {setIdx + 1}: {set.rounds ? `${set.rounds} rounds @ ${set.workSeconds || '20'}s/${set.restSeconds || '10'}s${set.calories ? ` • ${set.calories} kcal` : ''}` : 'Not logged'}
+                                      </>
+                                    ) : entryType === 'bodyweight' ? (
+                                      <>
+                                        Set {setIdx + 1}: {set.reps || set.holdTime ? `${set.reps ? `${set.reps} reps` : ''}${set.reps && set.holdTime ? ' • ' : ''}${set.holdTime ? `${set.holdTime}s hold` : ''}` : 'Not logged'}
+                                      </>
+                                    ) : (
+                                      <>Set {setIdx + 1}: {set.weight ? `${set.weight} lb × ${set.reps} reps` : 'Not logged'}</>
+                                    )}
+                                  </div>
+                                ))}
+                              </div>
+                              {entry.notes && (
+                                <p className="mt-2 text-xs text-gray-400 italic">
+                                  Note: {entry.notes}
+                                </p>
                               )}
                             </div>
-                          ))}
-                        </div>
-                        {entry.notes && (
-                          <p className="mt-2 text-xs text-gray-400 italic">
-                            Note: {entry.notes}
-                          </p>
-                        )}
+                          );
+                        })}
                       </div>
-                    );
-                  })}
-                </div>
+                    </>
+                  );
+                })()}
               </div>
             )}
 
@@ -2328,7 +2383,7 @@ const WorkoutTracker = () => {
               <div className="flex items-center justify-between">
                 <div className="flex items-center gap-1">
                   <button
-                    onClick={() => { setCurrentBlock(prev => Math.max(1, prev - 1)); setCurrentWeek(1); }}
+                    onClick={() => { const nb = Math.max(1, currentBlock - 1); setCurrentBlock(nb); setCurrentWeek(getLastPopulatedWeek(nb, workoutLogs)); }}
                     disabled={currentBlock === 1}
                     className="p-1.5 rounded-lg hover:bg-gray-700 text-gray-300 disabled:opacity-30 disabled:cursor-not-allowed"
                     title="Previous training block"
@@ -2346,7 +2401,7 @@ const WorkoutTracker = () => {
                     )}
                   </div>
                   <button
-                    onClick={() => { setCurrentBlock(prev => Math.min(highestBlockWithData, prev + 1)); setCurrentWeek(1); }}
+                    onClick={() => { const nb = Math.min(highestBlockWithData, currentBlock + 1); setCurrentBlock(nb); setCurrentWeek(getLastPopulatedWeek(nb, workoutLogs)); }}
                     disabled={currentBlock >= highestBlockWithData}
                     className="p-1.5 rounded-lg hover:bg-gray-700 text-gray-300 disabled:opacity-30 disabled:cursor-not-allowed"
                     title="Next training block"
@@ -2374,7 +2429,7 @@ const WorkoutTracker = () => {
                     Viewing past block — read only
                   </span>
                   <button
-                    onClick={() => { setCurrentBlock(highestBlockWithData); setCurrentWeek(1); }}
+                    onClick={() => { setCurrentBlock(highestBlockWithData); setCurrentWeek(getLastPopulatedWeek(highestBlockWithData, workoutLogs)); }}
                     className="text-xs text-amber-300 hover:text-amber-100 underline"
                   >
                     Return to current
