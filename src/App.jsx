@@ -9,9 +9,8 @@ const WorkoutTracker = () => {
   const [currentBlock, setCurrentBlock] = useState(1);
   const [currentWeek, setCurrentWeek] = useState(1);
   const [blockMetadata, setBlockMetadata] = useState({});
-  const [showNewBlockModal, setShowNewBlockModal] = useState(false);
-  const [newBlockName, setNewBlockName] = useState('');
   const [selectedDay, setSelectedDay] = useState(null);
+  const [expandedTemplateItem, setExpandedTemplateItem] = useState(null);
   const [selectedExerciseHistory, setSelectedExerciseHistory] = useState(null);
   const [exerciseSearchTerm, setExerciseSearchTerm] = useState('');
   
@@ -1175,18 +1174,6 @@ const WorkoutTracker = () => {
     return blocks[0]?.template || {};
   };
 
-  // Highest block number that has any data (logs or metadata)
-  const highestBlockWithData = useMemo(() => {
-    const fromLogs = Object.keys(workoutLogs)
-      .map(k => parseInt(k.match(/^block(\d+)-/)?.[1] || 0))
-      .filter(n => n > 0);
-    const fromMeta = Object.keys(blockMetadata).map(k => parseInt(k)).filter(n => n > 0);
-    const all = [...fromLogs, ...fromMeta, currentBlock];
-    return Math.max(...all);
-  }, [workoutLogs, blockMetadata, currentBlock]);
-
-  const isViewingCurrentBlock = currentBlock === highestBlockWithData;
-
   const formatDate = (dateString) => {
     if (!dateString) return '';
     const [year, month, day] = dateString.split('T')[0].split('-');
@@ -2099,12 +2086,8 @@ const WorkoutTracker = () => {
                     const existingDays = Object.keys(template);
                     const allDays = ['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday'];
                     const availableDays = allDays.filter(d => !existingDays.includes(d));
-
                     if (availableDays.length > 0) {
-                      template[availableDays[0]] = {
-                        name: 'New Workout',
-                        exercises: []
-                      };
+                      template[availableDays[0]] = { name: 'New Workout', exercises: [] };
                       setBlocks(newBlocks);
                     }
                   }}
@@ -2115,218 +2098,297 @@ const WorkoutTracker = () => {
                 </button>
               </div>
 
-              {Object.entries(blocks[0]?.template || {}).map(([dayKey, dayData]) => (
-                <div key={dayKey} className="bg-gray-800 p-4 rounded-lg border border-gray-700">
-                  <div className="flex items-center justify-between mb-4">
-                    <div className="flex items-center gap-3 flex-1">
-                      <select
-                        value={dayKey}
-                        onChange={(e) => {
-                          const newBlocks = [...blocks];
-                          const template = newBlocks[0].template;
-                          const newDayKey = e.target.value;
-                          if (newDayKey !== dayKey && !template[newDayKey]) {
-                            template[newDayKey] = template[dayKey];
-                            delete template[dayKey];
-                            setBlocks(newBlocks);
-                          }
-                        }}
-                        className="px-3 py-2 bg-gray-700 border border-gray-600 rounded-lg text-gray-100 font-medium"
-                      >
-                        {['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday'].map(d => (
-                          <option key={d} value={d} disabled={d !== dayKey && blocks[0]?.template[d]}>
-                            {d.charAt(0).toUpperCase() + d.slice(1)}
-                          </option>
-                        ))}
-                      </select>
-                      <input
-                        type="text"
-                        value={dayData.name}
-                        onChange={(e) => {
-                          const newBlocks = [...blocks];
-                          newBlocks[0].template[dayKey].name = e.target.value;
-                          setBlocks(newBlocks);
-                        }}
-                        className="flex-1 px-3 py-2 bg-gray-700 border border-gray-600 rounded-lg text-gray-100"
-                        placeholder="Workout name (e.g., Upper Body Push)"
-                      />
-                    </div>
-                    <button
-                      onClick={() => {
-                        if (window.confirm(`Remove ${dayKey.charAt(0).toUpperCase() + dayKey.slice(1)} from template?`)) {
-                          const newBlocks = [...blocks];
-                          delete newBlocks[0].template[dayKey];
-                          setBlocks(newBlocks);
-                        }
-                      }}
-                      className="ml-3 p-2 bg-red-600/20 hover:bg-red-600/30 text-red-400 rounded-lg"
-                    >
-                      <Trash2 className="w-4 h-4" />
-                    </button>
-                  </div>
+              <div className="grid gap-3">
+                {['monday','tuesday','wednesday','thursday','friday','saturday','sunday']
+                  .filter(d => blocks[0]?.template[d])
+                  .map(dayKey => {
+                    const dayData = blocks[0].template[dayKey];
+                    return (
+                      <div key={dayKey} className="p-4 rounded-lg border border-gray-700 bg-gray-800">
 
-                  {/* Exercises for this day */}
-                  <div className="space-y-3">
-                    <p className="text-xs text-gray-400 font-medium">Exercises:</p>
-                    {dayData.exercises.map((exercise, exIdx) => (
-                      <div key={exIdx} className="p-3 bg-gray-900/50 rounded-lg border border-gray-600">
-                        <div className="flex items-start gap-2 mb-2">
-                          <input
-                            type="text"
-                            value={exercise.name}
-                            onChange={(e) => {
-                              const newBlocks = [...blocks];
-                              newBlocks[0].template[dayKey].exercises[exIdx].name = e.target.value;
-                              setBlocks(newBlocks);
-                            }}
-                            className="flex-1 px-3 py-2 bg-gray-700 border border-gray-600 rounded-lg text-gray-100 text-sm"
-                            placeholder="Exercise name"
-                          />
+                        {/* Day header — mirrors calendar card */}
+                        <div className="flex items-center justify-between mb-3">
+                          <div className="flex-1 min-w-0">
+                            <h3 className="font-semibold text-gray-100">
+                              {dayKey.charAt(0).toUpperCase() + dayKey.slice(1)}
+                            </h3>
+                            <input
+                              type="text"
+                              value={dayData.name}
+                              onChange={(e) => {
+                                const newBlocks = [...blocks];
+                                newBlocks[0].template[dayKey].name = e.target.value;
+                                setBlocks(newBlocks);
+                              }}
+                              className="text-sm text-gray-400 bg-transparent border-none outline-none mt-0.5 w-full"
+                              placeholder="Workout name"
+                            />
+                          </div>
                           <button
                             onClick={() => {
-                              if (!window.confirm(`Remove "${exercise.name || 'this exercise'}" from the template?`)) return;
-                              const newBlocks = [...blocks];
-                              newBlocks[0].template[dayKey].exercises = dayData.exercises.filter((_, i) => i !== exIdx);
-                              setBlocks(newBlocks);
+                              if (window.confirm(`Remove ${dayKey.charAt(0).toUpperCase() + dayKey.slice(1)} from template?`)) {
+                                const newBlocks = [...blocks];
+                                delete newBlocks[0].template[dayKey];
+                                setBlocks(newBlocks);
+                              }
                             }}
-                            className="p-2 hover:bg-red-600/20 text-red-400 rounded"
+                            className="ml-3 p-2 text-red-400 hover:bg-red-600/20 rounded-lg"
                           >
-                            <X className="w-4 h-4" />
+                            <Trash2 className="w-4 h-4" />
                           </button>
                         </div>
-                        <div className="grid grid-cols-2 md:grid-cols-5 gap-2">
-                          <div>
-                            <label className="text-xs text-gray-500">Sets</label>
-                            <input
-                              type="text"
-                              value={exercise.sets}
-                              onChange={(e) => {
-                                const newBlocks = [...blocks];
-                                newBlocks[0].template[dayKey].exercises[exIdx].sets = e.target.value;
-                                setBlocks(newBlocks);
-                              }}
-                              className="w-full px-2 py-1 bg-gray-700 border border-gray-600 rounded text-gray-100 text-sm"
-                              placeholder="3"
-                            />
-                          </div>
-                          <div>
-                            <label className="text-xs text-gray-500">Reps</label>
-                            <input
-                              type="text"
-                              value={exercise.reps}
-                              onChange={(e) => {
-                                const newBlocks = [...blocks];
-                                newBlocks[0].template[dayKey].exercises[exIdx].reps = e.target.value;
-                                setBlocks(newBlocks);
-                              }}
-                              className="w-full px-2 py-1 bg-gray-700 border border-gray-600 rounded text-gray-100 text-sm"
-                              placeholder="8-12"
-                            />
-                          </div>
-                          <div>
-                            <label className="text-xs text-gray-500">Technique</label>
-                            <input
-                              type="text"
-                              value={exercise.technique || ''}
-                              onChange={(e) => {
-                                const newBlocks = [...blocks];
-                                newBlocks[0].template[dayKey].exercises[exIdx].technique = e.target.value;
-                                setBlocks(newBlocks);
-                              }}
-                              className="w-full px-2 py-1 bg-gray-700 border border-gray-600 rounded text-gray-100 text-sm"
-                              placeholder="Failure"
-                            />
-                          </div>
-                          <div>
-                            <label className="text-xs text-gray-500">Rest</label>
-                            <input
-                              type="text"
-                              value={exercise.rest || ''}
-                              onChange={(e) => {
-                                const newBlocks = [...blocks];
-                                newBlocks[0].template[dayKey].exercises[exIdx].rest = e.target.value;
-                                setBlocks(newBlocks);
-                              }}
-                              className="w-full px-2 py-1 bg-gray-700 border border-gray-600 rounded text-gray-100 text-sm"
-                              placeholder="2-3 min"
-                            />
-                          </div>
-                          <div>
-                            <label className="text-xs text-gray-500 flex items-center gap-1" title="Percentage of Training Max — auto-fills weight when you open this workout">% of TM</label>
-                            <input
-                              type="number"
-                              min="50"
-                              max="110"
-                              placeholder="—"
-                              value={exercise.percentage || ''}
-                              onChange={(e) => {
-                                const newBlocks = [...blocks];
-                                const val = e.target.value;
-                                newBlocks[0].template[dayKey].exercises[exIdx].percentage =
-                                  val ? parseInt(val) : undefined;
-                                setBlocks(newBlocks);
-                              }}
-                              className="w-full px-2 py-1 bg-gray-700 border border-gray-600 rounded text-gray-100 text-sm"
-                            />
-                            {(() => {
-                              const tmKey = exercise.tmLink || exercise.name;
-                              const tm = trainingMaxes[tmKey];
-                              if (exercise.percentage && tm) return (
-                                <p className="text-xs text-purple-400 mt-1">= {getPercentageWeight(tmKey, exercise.percentage)} lb</p>
-                              );
-                              if (exercise.percentage && !tm) return (
-                                <p className="text-xs text-gray-500 mt-1">No TM set</p>
-                              );
-                              return null;
-                            })()}
-                          </div>
+
+                        {/* Exercise list */}
+                        <div className="space-y-2">
+                          {dayData.exercises.map((exercise, exIdx) => {
+                            const itemKey = `${dayKey}-${exIdx}`;
+                            const isExpanded = expandedTemplateItem === itemKey;
+                            return (
+                              <div key={exIdx} className="bg-gray-900/50 rounded-lg border border-gray-600 p-3">
+
+                                {/* Exercise name row + Edit toggle + remove */}
+                                <div className="flex items-center gap-2 mb-2">
+                                  <input
+                                    type="text"
+                                    value={exercise.name}
+                                    onChange={(e) => {
+                                      const newBlocks = [...blocks];
+                                      newBlocks[0].template[dayKey].exercises[exIdx].name = e.target.value;
+                                      setBlocks(newBlocks);
+                                    }}
+                                    className="flex-1 text-sm font-medium text-gray-100 bg-transparent border-none outline-none"
+                                    placeholder="Exercise name"
+                                  />
+                                  <button
+                                    onClick={() => setExpandedTemplateItem(isExpanded ? null : itemKey)}
+                                    className="text-xs text-gray-400 hover:text-gray-200 px-2 py-0.5 rounded bg-gray-700/50 shrink-0"
+                                  >
+                                    {isExpanded ? 'Done' : 'Edit'}
+                                  </button>
+                                  <button
+                                    onClick={() => {
+                                      if (!window.confirm(`Remove "${exercise.name || 'this exercise'}" from the template?`)) return;
+                                      const newBlocks = [...blocks];
+                                      newBlocks[0].template[dayKey].exercises = dayData.exercises.filter((_, i) => i !== exIdx);
+                                      setBlocks(newBlocks);
+                                    }}
+                                    className="text-red-400 hover:bg-red-600/20 rounded p-0.5 shrink-0"
+                                  >
+                                    <X className="w-3.5 h-3.5" />
+                                  </button>
+                                </div>
+
+                                {/* Advanced fields — only shown when expanded */}
+                                {isExpanded && (
+                                  <div className="mb-3 space-y-2">
+                                    <div className="grid grid-cols-2 md:grid-cols-5 gap-2">
+                                      <div>
+                                        <label className="text-xs text-gray-500">Sets</label>
+                                        <input
+                                          type="text"
+                                          value={exercise.sets}
+                                          onChange={(e) => {
+                                            const newBlocks = [...blocks];
+                                            newBlocks[0].template[dayKey].exercises[exIdx].sets = e.target.value;
+                                            setBlocks(newBlocks);
+                                          }}
+                                          className="w-full px-2 py-1 bg-gray-700 border border-gray-600 rounded text-gray-100 text-sm"
+                                          placeholder="3"
+                                        />
+                                      </div>
+                                      <div>
+                                        <label className="text-xs text-gray-500">Reps</label>
+                                        <input
+                                          type="text"
+                                          value={exercise.reps}
+                                          onChange={(e) => {
+                                            const newBlocks = [...blocks];
+                                            newBlocks[0].template[dayKey].exercises[exIdx].reps = e.target.value;
+                                            setBlocks(newBlocks);
+                                          }}
+                                          className="w-full px-2 py-1 bg-gray-700 border border-gray-600 rounded text-gray-100 text-sm"
+                                          placeholder="8-12"
+                                        />
+                                      </div>
+                                      <div>
+                                        <label className="text-xs text-gray-500">Technique</label>
+                                        <input
+                                          type="text"
+                                          value={exercise.technique || ''}
+                                          onChange={(e) => {
+                                            const newBlocks = [...blocks];
+                                            newBlocks[0].template[dayKey].exercises[exIdx].technique = e.target.value;
+                                            setBlocks(newBlocks);
+                                          }}
+                                          className="w-full px-2 py-1 bg-gray-700 border border-gray-600 rounded text-gray-100 text-sm"
+                                          placeholder="Failure"
+                                        />
+                                      </div>
+                                      <div>
+                                        <label className="text-xs text-gray-500">Rest</label>
+                                        <input
+                                          type="text"
+                                          value={exercise.rest || ''}
+                                          onChange={(e) => {
+                                            const newBlocks = [...blocks];
+                                            newBlocks[0].template[dayKey].exercises[exIdx].rest = e.target.value;
+                                            setBlocks(newBlocks);
+                                          }}
+                                          className="w-full px-2 py-1 bg-gray-700 border border-gray-600 rounded text-gray-100 text-sm"
+                                          placeholder="2-3 min"
+                                        />
+                                      </div>
+                                      <div>
+                                        <label className="text-xs text-gray-500 flex items-center gap-1" title="Percentage of Training Max — auto-fills weight when you open this workout">% of TM</label>
+                                        <input
+                                          type="number"
+                                          min="50"
+                                          max="110"
+                                          placeholder="—"
+                                          value={exercise.percentage || ''}
+                                          onChange={(e) => {
+                                            const newBlocks = [...blocks];
+                                            const val = e.target.value;
+                                            newBlocks[0].template[dayKey].exercises[exIdx].percentage = val ? parseInt(val) : undefined;
+                                            setBlocks(newBlocks);
+                                          }}
+                                          className="w-full px-2 py-1 bg-gray-700 border border-gray-600 rounded text-gray-100 text-sm"
+                                        />
+                                        {(() => {
+                                          const tmKey = exercise.tmLink || exercise.name;
+                                          const tm = trainingMaxes[tmKey];
+                                          if (exercise.percentage && tm) return <p className="text-xs text-purple-400 mt-1">= {getPercentageWeight(tmKey, exercise.percentage)} lb</p>;
+                                          if (exercise.percentage && !tm) return <p className="text-xs text-gray-500 mt-1">No TM set</p>;
+                                          return null;
+                                        })()}
+                                      </div>
+                                    </div>
+                                    {Object.keys(trainingMaxes).length > 0 && (
+                                      <div>
+                                        <label className="text-xs text-gray-500" title="Link this exercise to a specific Training Max for % auto-fill and live % display">Linked TM</label>
+                                        <select
+                                          value={exercise.tmLink || ''}
+                                          onChange={(e) => {
+                                            const newBlocks = [...blocks];
+                                            const val = e.target.value;
+                                            newBlocks[0].template[dayKey].exercises[exIdx].tmLink = val || undefined;
+                                            setBlocks(newBlocks);
+                                          }}
+                                          className="w-full px-2 py-1 bg-gray-700 border border-gray-600 rounded text-gray-100 text-sm mt-1"
+                                        >
+                                          <option value="">— match by name —</option>
+                                          {Object.keys(trainingMaxes).map(name => (
+                                            <option key={name} value={name}>{name} ({trainingMaxes[name].trainingMax} lb)</option>
+                                          ))}
+                                        </select>
+                                      </div>
+                                    )}
+                                  </div>
+                                )}
+
+                                {/* Weekly progression — always visible */}
+                                <div className={isExpanded ? 'mt-3 pt-3 border-t border-gray-700/50' : ''}>
+                                  <div className="flex items-center justify-between mb-1.5">
+                                    <span className="text-xs text-gray-400">Weekly progression</span>
+                                    <button
+                                      onClick={() => {
+                                        const newBlocks = [...blocks];
+                                        const prog = newBlocks[0].template[dayKey].exercises[exIdx].weeklyProgression || [];
+                                        const nextWeek = prog.length > 0 ? Math.max(...prog.map(p => p.week)) + 1 : 1;
+                                        prog.push({ week: nextWeek, percentage: exercise.percentage || '', sets: exercise.sets || 3, reps: exercise.reps || '' });
+                                        newBlocks[0].template[dayKey].exercises[exIdx].weeklyProgression = [...prog];
+                                        setBlocks(newBlocks);
+                                      }}
+                                      className="text-xs text-emerald-400 hover:text-emerald-300 flex items-center gap-0.5"
+                                    >
+                                      <Plus className="w-3 h-3" /> Add week
+                                    </button>
+                                  </div>
+                                  {(exercise.weeklyProgression || []).map((entry, wIdx) => (
+                                    <div key={wIdx} className="flex items-center gap-1.5 mb-1.5 text-xs">
+                                      <span className="text-gray-500 w-9 shrink-0">Wk {entry.week}</span>
+                                      <input
+                                        type="number"
+                                        value={entry.percentage}
+                                        placeholder="%"
+                                        inputMode="decimal"
+                                        onChange={(e) => {
+                                          const newBlocks = [...blocks];
+                                          newBlocks[0].template[dayKey].exercises[exIdx].weeklyProgression[wIdx].percentage = e.target.value ? parseFloat(e.target.value) : '';
+                                          setBlocks(newBlocks);
+                                        }}
+                                        className="w-12 px-1 py-0.5 bg-gray-700 border border-gray-600 rounded text-gray-100"
+                                      />
+                                      <span className="text-gray-500">%</span>
+                                      <input
+                                        type="text"
+                                        value={entry.sets}
+                                        placeholder="sets"
+                                        inputMode="decimal"
+                                        onChange={(e) => {
+                                          const newBlocks = [...blocks];
+                                          newBlocks[0].template[dayKey].exercises[exIdx].weeklyProgression[wIdx].sets = e.target.value;
+                                          setBlocks(newBlocks);
+                                        }}
+                                        className="w-9 px-1 py-0.5 bg-gray-700 border border-gray-600 rounded text-gray-100"
+                                      />
+                                      <span className="text-gray-500">×</span>
+                                      <input
+                                        type="text"
+                                        value={entry.reps}
+                                        placeholder="reps"
+                                        onChange={(e) => {
+                                          const newBlocks = [...blocks];
+                                          newBlocks[0].template[dayKey].exercises[exIdx].weeklyProgression[wIdx].reps = e.target.value;
+                                          setBlocks(newBlocks);
+                                        }}
+                                        className="w-16 px-1 py-0.5 bg-gray-700 border border-gray-600 rounded text-gray-100"
+                                      />
+                                      {(() => {
+                                        const tmKey = exercise.tmLink || exercise.name;
+                                        const w = getPercentageWeight(tmKey, entry.percentage);
+                                        return w ? <span className="text-purple-400 shrink-0">= {w} lb</span> : null;
+                                      })()}
+                                      <button
+                                        onClick={() => {
+                                          const newBlocks = [...blocks];
+                                          newBlocks[0].template[dayKey].exercises[exIdx].weeklyProgression =
+                                            newBlocks[0].template[dayKey].exercises[exIdx].weeklyProgression.filter((_, i) => i !== wIdx);
+                                          setBlocks(newBlocks);
+                                        }}
+                                        className="text-red-400 hover:text-red-300 ml-auto"
+                                      >
+                                        <X className="w-3.5 h-3.5" />
+                                      </button>
+                                    </div>
+                                  ))}
+                                </div>
+
+                              </div>
+                            );
+                          })}
                         </div>
 
-                        {/* Linked TM */}
-                        {Object.keys(trainingMaxes).length > 0 && (
-                          <div className="mt-2">
-                            <label className="text-xs text-gray-500" title="Link this exercise to a specific Training Max for % auto-fill and live % display">Linked TM</label>
-                            <select
-                              value={exercise.tmLink || ''}
-                              onChange={(e) => {
-                                const newBlocks = [...blocks];
-                                const val = e.target.value;
-                                newBlocks[0].template[dayKey].exercises[exIdx].tmLink = val || undefined;
-                                setBlocks(newBlocks);
-                              }}
-                              className="w-full px-2 py-1 bg-gray-700 border border-gray-600 rounded text-gray-100 text-sm mt-1"
-                            >
-                              <option value="">— match by name —</option>
-                              {Object.keys(trainingMaxes).map(name => (
-                                <option key={name} value={name}>{name} ({trainingMaxes[name].trainingMax} lb)</option>
-                              ))}
-                            </select>
-                          </div>
-                        )}
+                        {/* Add Exercise */}
+                        <button
+                          onClick={() => {
+                            const newBlocks = [...blocks];
+                            const exList = newBlocks[0].template[dayKey].exercises;
+                            exList.push({ name: '', sets: '3', reps: '8-12', technique: '', rest: '2-3 min' });
+                            setBlocks(newBlocks);
+                            setExpandedTemplateItem(`${dayKey}-${exList.length - 1}`);
+                          }}
+                          className="mt-3 w-full py-2 px-3 bg-gray-700 hover:bg-gray-600 text-gray-300 text-sm rounded-lg flex items-center justify-center gap-2"
+                        >
+                          <Plus className="w-4 h-4" />
+                          Add Exercise
+                        </button>
 
                       </div>
-                    ))}
-
-                    <button
-                      onClick={() => {
-                        const newBlocks = [...blocks];
-                        newBlocks[0].template[dayKey].exercises.push({
-                          name: '',
-                          sets: '3',
-                          reps: '8-12',
-                          technique: '',
-                          rest: '2-3 min'
-                        });
-                        setBlocks(newBlocks);
-                      }}
-                      className="w-full py-2 px-3 bg-gray-700 hover:bg-gray-600 text-gray-300 text-sm rounded-lg flex items-center justify-center gap-2"
-                    >
-                      <Plus className="w-4 h-4" />
-                      Add Exercise
-                    </button>
-                  </div>
-                </div>
-              ))}
+                    );
+                  })
+                }
+              </div>
             </div>
 
             {/* Reset Template */}
@@ -2385,68 +2447,32 @@ const WorkoutTracker = () => {
         {view === 'calendar' && (
           <div className="space-y-6">
             <div className="space-y-3">
-              {/* Block navigation row */}
-              <div className="flex items-center justify-between">
-                <div className="flex items-center gap-1">
-                  <button
-                    onClick={() => { const nb = Math.max(1, currentBlock - 1); setCurrentBlock(nb); setCurrentWeek(getLastPopulatedWeek(nb, workoutLogs)); }}
-                    disabled={currentBlock === 1}
-                    className="p-1.5 rounded-lg hover:bg-gray-700 text-gray-300 disabled:opacity-30 disabled:cursor-not-allowed"
-                    title="Previous training block"
-                  >
-                    <ChevronLeft className="w-4 h-4" />
-                  </button>
-                  <div className="text-center px-1">
-                    <span className="text-sm font-semibold text-gray-100">
-                      {blockMetadata[currentBlock]?.name || `Block ${currentBlock}`}
-                    </span>
-                    {blockMetadata[currentBlock]?.startDate && (
-                      <span className="text-xs text-gray-500 ml-2">
-                        · started {formatDate(blockMetadata[currentBlock].startDate)}
-                      </span>
-                    )}
-                  </div>
-                  <button
-                    onClick={() => { const nb = Math.min(highestBlockWithData, currentBlock + 1); setCurrentBlock(nb); setCurrentWeek(getLastPopulatedWeek(nb, workoutLogs)); }}
-                    disabled={currentBlock >= highestBlockWithData}
-                    className="p-1.5 rounded-lg hover:bg-gray-700 text-gray-300 disabled:opacity-30 disabled:cursor-not-allowed"
-                    title="Next training block"
-                  >
-                    <ChevronRight className="w-4 h-4" />
-                  </button>
-                </div>
-                {isViewingCurrentBlock && (
-                  <button
-                    onClick={() => { setNewBlockName(''); setShowNewBlockModal(true); }}
-                    className="px-3 py-1.5 bg-emerald-700 hover:bg-emerald-600 text-white rounded-lg text-xs font-medium flex items-center gap-1"
-                    title="Start a new training cycle"
-                  >
-                    <Plus className="w-3.5 h-3.5" />
-                    New Block
-                  </button>
-                )}
+              {/* New Cycle button */}
+              <div className="flex justify-end">
+                <button
+                  onClick={() => {
+                    if (!window.confirm("Start a new training cycle? You'll return to Week 1.")) return;
+                    const newBlockNum = currentBlock + 1;
+                    const today = new Date().toISOString().split('T')[0];
+                    setBlockMetadata({ ...blockMetadata, [newBlockNum]: { name: `Block ${newBlockNum}`, startDate: today } });
+                    setCurrentBlock(newBlockNum);
+                    setCurrentWeek(1);
+                  }}
+                  className="px-3 py-1.5 bg-emerald-700 hover:bg-emerald-600 text-white rounded-lg text-xs font-medium flex items-center gap-1"
+                  title="Start a new training cycle"
+                >
+                  <Plus className="w-3.5 h-3.5" />
+                  New Cycle
+                </button>
               </div>
-
-              {/* Historical block banner */}
-              {!isViewingCurrentBlock && (
-                <div className="flex items-center justify-between px-3 py-2 bg-amber-950/30 border border-amber-800/40 rounded-lg">
-                  <span className="text-xs text-amber-400 flex items-center gap-1">
-                    <History className="w-3 h-3" />
-                    Viewing past block — read only
-                  </span>
-                  <button
-                    onClick={() => { setCurrentBlock(highestBlockWithData); setCurrentWeek(getLastPopulatedWeek(highestBlockWithData, workoutLogs)); }}
-                    className="text-xs text-amber-300 hover:text-amber-100 underline"
-                  >
-                    Return to current
-                  </button>
-                </div>
-              )}
 
               {/* Week navigation row */}
               <div className="flex items-center justify-between">
                 <div>
-                  <h2 className="text-2xl font-bold text-gray-100">{isViewingCurrentBlock ? 'Current Block' : `Block ${currentBlock}`} · Week {currentWeek}</h2>
+                  <h2 className="text-2xl font-bold text-gray-100">Current Block · Week {currentWeek}</h2>
+                  {blockMetadata[currentBlock]?.name && (
+                    <p className="text-sm text-gray-400 mt-0.5">{blockMetadata[currentBlock].name}</p>
+                  )}
                 </div>
                 <div className="flex gap-2">
                   <button
@@ -2461,7 +2487,7 @@ const WorkoutTracker = () => {
                   </span>
                   <button
                     onClick={() => setCurrentWeek(currentWeek + 1)}
-                    disabled={!isViewingCurrentBlock && currentWeek >= (blocks[0]?.weeks || 52)}
+                    disabled={currentWeek >= (blocks[0]?.weeks || 52)}
                     className="p-2 rounded-lg hover:bg-gray-700 text-gray-300 disabled:opacity-30"
                   >
                     <ChevronRight className="w-5 h-5" />
@@ -2481,9 +2507,6 @@ const WorkoutTracker = () => {
                   <div
                     key={day}
                     onClick={() => {
-                      // Don't open empty days in past blocks
-                      if (!isViewingCurrentBlock && !workoutLogs[logKey]) return;
-
                       setSelectedDay(day);
                       const existingLog = workoutLogs[logKey];
 
@@ -2531,21 +2554,27 @@ const WorkoutTracker = () => {
                           setExercises(workout?.exercises.map(ex => {
                             const exType = ex.type || 'strength';
 
+                            // Apply weekly progression override if one exists for currentWeek
+                            const weekOverride = ex.weeklyProgression?.find(w => w.week === currentWeek) ?? null;
+                            const effectivePct  = weekOverride?.percentage  ?? ex.percentage;
+                            const effectiveSets = weekOverride?.sets        ?? ex.sets;
+                            const effectiveReps = weekOverride?.reps        ?? ex.reps;
+
                             // Auto-fill weight from % of TM (use tmLink if set)
                             const tmLookup = ex.tmLink || ex.name;
-                            const pctWeight = (ex.percentage && exType === 'strength')
-                              ? getPercentageWeight(tmLookup, ex.percentage)
+                            const pctWeight = (effectivePct && exType === 'strength')
+                              ? getPercentageWeight(tmLookup, effectivePct)
                               : null;
-                            const targetReps = parseTargetReps(ex.reps);
+                            const targetReps = parseTargetReps(effectiveReps);
                             return {
                               name: ex.name,
                               type: exType,
                               technique: ex.technique,
-                              templateTarget: (ex.sets && ex.reps) ? `${ex.sets}×${ex.reps}` : null,
-                              templatePercentage: ex.percentage || null,
-                              templateReps: ex.reps || null,
+                              templateTarget: (effectiveSets && effectiveReps) ? `${effectiveSets}×${effectiveReps}` : null,
+                              templatePercentage: effectivePct || null,
+                              templateReps: effectiveReps || null,
                               tmLink: ex.tmLink || null,
-                              sets: Array(parseInt(ex.sets) || 3).fill(null).map(() => ({
+                              sets: Array(parseInt(effectiveSets) || 3).fill(null).map(() => ({
                                 weight: pctWeight ? String(pctWeight) : '',
                                 reps: targetReps,
                                 weightSource: pctWeight ? 'tm-pct' : 'manual'
@@ -2561,9 +2590,7 @@ const WorkoutTracker = () => {
                     className={`p-4 rounded-lg border transition-all ${
                       log
                         ? 'border-emerald-500 bg-emerald-950/30 hover:bg-emerald-950/50 cursor-pointer'
-                        : isViewingCurrentBlock
-                          ? 'border-gray-700 bg-gray-800 hover:bg-gray-750 hover:border-gray-600 cursor-pointer'
-                          : 'border-gray-700 bg-gray-800 opacity-40 cursor-default'
+                        : 'border-gray-700 bg-gray-800 hover:bg-gray-750 hover:border-gray-600 cursor-pointer'
                     }`}
                   >
                     <div className="flex items-center justify-between">
@@ -3469,14 +3496,7 @@ const WorkoutTracker = () => {
               </button>
             </div>
 
-            {!isViewingCurrentBlock && (
-              <div className="flex items-center gap-2 p-3 bg-amber-950/30 border border-amber-800/40 rounded-lg text-xs text-amber-400">
-                <History className="w-3.5 h-3.5 flex-shrink-0" />
-                Viewing past block — this workout is read only
-              </div>
-            )}
-
-            {isViewingCurrentBlock && <button
+            <button
               onClick={() => {
                 const logKey = `block${currentBlock}-week${currentWeek}-${selectedDay}`;
                 const weekKey = `block${currentBlock}-week${currentWeek}`;
@@ -3519,7 +3539,7 @@ const WorkoutTracker = () => {
             >
               <Save className="w-5 h-5" />
               Save Workout
-            </button>}
+            </button>
           </div>
         )}
       </div>
@@ -3673,64 +3693,6 @@ const WorkoutTracker = () => {
             >
               Awesome! Continue
             </button>
-          </div>
-        </div>
-      )}
-
-      {/* New Block Modal */}
-      {showNewBlockModal && (
-        <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-50 p-4">
-          <div className="bg-gray-800 border border-gray-700 rounded-xl p-6 max-w-sm w-full">
-            <div className="flex justify-between items-center mb-2">
-              <h2 className="text-xl font-bold text-gray-100">Start Block {currentBlock + 1}?</h2>
-              <button onClick={() => setShowNewBlockModal(false)} className="text-gray-400 hover:text-gray-200">
-                <X className="w-5 h-5" />
-              </button>
-            </div>
-            <p className="text-sm text-gray-400 mb-4">
-              This starts a new training cycle. Your current workout logs and all personal records are saved and will remain browseable. You&apos;ll return to Week 1 with the same exercise template.
-            </p>
-            <div className="mb-4">
-              <label className="text-xs text-gray-400 block mb-1">
-                Name for Block {currentBlock + 1} (optional)
-              </label>
-              <input
-                type="text"
-                placeholder={`Block ${currentBlock + 1}`}
-                value={newBlockName}
-                onChange={(e) => setNewBlockName(e.target.value)}
-                className="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded-lg text-gray-100 text-sm"
-                autoFocus
-              />
-            </div>
-            <div className="flex gap-3">
-              <button
-                onClick={() => setShowNewBlockModal(false)}
-                className="flex-1 py-2 bg-gray-700 hover:bg-gray-600 text-gray-300 rounded-lg text-sm"
-              >
-                Cancel
-              </button>
-              <button
-                onClick={() => {
-                  const newBlockNum = currentBlock + 1;
-                  const today = new Date().toISOString().split('T')[0];
-                  setBlockMetadata({
-                    ...blockMetadata,
-                    [newBlockNum]: {
-                      name: newBlockName.trim() || `Block ${newBlockNum}`,
-                      startDate: today
-                    }
-                  });
-                  setCurrentBlock(newBlockNum);
-                  setCurrentWeek(1);
-                  setShowNewBlockModal(false);
-                  setNewBlockName('');
-                }}
-                className="flex-1 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-sm font-medium"
-              >
-                Start Block {currentBlock + 1}
-              </button>
-            </div>
           </div>
         </div>
       )}
