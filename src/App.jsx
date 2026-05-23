@@ -2304,51 +2304,61 @@ const WorkoutTracker = () => {
                                       <Plus className="w-3 h-3" /> Add week
                                     </button>
                                   </div>
+                                  {(exercise.weeklyProgression || []).length > 0 && (
+                                    <div className="grid grid-cols-[2.5rem_1fr_1fr_1fr_auto_auto] gap-x-2 gap-y-1 text-xs mb-1">
+                                      <span />
+                                      <span className="text-gray-500">% of TM</span>
+                                      <span className="text-gray-500">Sets</span>
+                                      <span className="text-gray-500">Reps</span>
+                                      <span className="text-gray-500">Weight</span>
+                                      <span />
+                                    </div>
+                                  )}
                                   {(exercise.weeklyProgression || []).map((entry, wIdx) => (
-                                    <div key={wIdx} className="flex items-center gap-1.5 mb-1.5 text-xs">
-                                      <span className="text-gray-500 w-9 shrink-0">Wk {entry.week}</span>
+                                    <div key={wIdx} className="grid grid-cols-[2.5rem_1fr_1fr_1fr_auto_auto] items-center gap-x-2 gap-y-1 mb-1.5 text-xs">
+                                      <span className="text-gray-500">Wk {entry.week}</span>
                                       <input
                                         type="number"
                                         value={entry.percentage}
-                                        placeholder="%"
+                                        placeholder="—"
                                         inputMode="decimal"
                                         onChange={(e) => {
                                           const newBlocks = [...blocks];
                                           newBlocks[0].template[dayKey].exercises[exIdx].weeklyProgression[wIdx].percentage = e.target.value ? parseFloat(e.target.value) : '';
                                           setBlocks(newBlocks);
                                         }}
-                                        className="w-12 px-1 py-0.5 bg-gray-700 border border-gray-600 rounded text-gray-100"
+                                        className="w-full px-1 py-0.5 bg-gray-700 border border-gray-600 rounded text-gray-100"
                                       />
-                                      <span className="text-gray-500">%</span>
                                       <input
                                         type="text"
                                         value={entry.sets}
-                                        placeholder="sets"
+                                        placeholder="—"
                                         inputMode="decimal"
                                         onChange={(e) => {
                                           const newBlocks = [...blocks];
                                           newBlocks[0].template[dayKey].exercises[exIdx].weeklyProgression[wIdx].sets = e.target.value;
                                           setBlocks(newBlocks);
                                         }}
-                                        className="w-9 px-1 py-0.5 bg-gray-700 border border-gray-600 rounded text-gray-100"
+                                        className="w-full px-1 py-0.5 bg-gray-700 border border-gray-600 rounded text-gray-100"
                                       />
-                                      <span className="text-gray-500">×</span>
                                       <input
                                         type="text"
                                         value={entry.reps}
-                                        placeholder="reps"
+                                        placeholder="—"
                                         onChange={(e) => {
                                           const newBlocks = [...blocks];
                                           newBlocks[0].template[dayKey].exercises[exIdx].weeklyProgression[wIdx].reps = e.target.value;
                                           setBlocks(newBlocks);
                                         }}
-                                        className="w-16 px-1 py-0.5 bg-gray-700 border border-gray-600 rounded text-gray-100"
+                                        className="w-full px-1 py-0.5 bg-gray-700 border border-gray-600 rounded text-gray-100"
                                       />
-                                      {(() => {
-                                        const tmKey = exercise.tmLink || exercise.name;
-                                        const w = getPercentageWeight(tmKey, entry.percentage);
-                                        return w ? <span className="text-purple-400 shrink-0">= {w} lb</span> : null;
-                                      })()}
+                                      <span className="text-purple-400 whitespace-nowrap">
+                                        {(() => {
+                                          const tmKey = exercise.tmLink || exercise.name;
+                                          const w = getPercentageWeight(tmKey, entry.percentage);
+                                          return w ? `${w} lb` : '—';
+                                        })()}
+                                      </span>
                                       <button
                                         onClick={() => {
                                           const newBlocks = [...blocks];
@@ -2356,7 +2366,7 @@ const WorkoutTracker = () => {
                                             newBlocks[0].template[dayKey].exercises[exIdx].weeklyProgression.filter((_, i) => i !== wIdx);
                                           setBlocks(newBlocks);
                                         }}
-                                        className="text-red-400 hover:text-red-300 ml-auto"
+                                        className="text-red-400 hover:text-red-300"
                                       >
                                         <X className="w-3.5 h-3.5" />
                                       </button>
