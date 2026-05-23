@@ -1160,6 +1160,12 @@ const WorkoutTracker = () => {
   const handleLogout = async () => {
     if (!supabase) return;
     await supabase.auth.signOut();
+    localStorage.removeItem('workout-logs');
+    localStorage.removeItem('workout-blocks');
+    localStorage.removeItem('personal-records');
+    localStorage.removeItem('current-block');
+    localStorage.removeItem('block-metadata');
+    localStorage.removeItem('training-maxes');
   };
 
   const days = ['monday', 'tuesday', 'wednesday', 'thursday', 'friday'];
@@ -2440,7 +2446,7 @@ const WorkoutTracker = () => {
               {/* Week navigation row */}
               <div className="flex items-center justify-between">
                 <div>
-                  <h2 className="text-2xl font-bold text-gray-100">Block {currentBlock} · Week {currentWeek}</h2>
+                  <h2 className="text-2xl font-bold text-gray-100">{isViewingCurrentBlock ? 'Current Block' : `Block ${currentBlock}`} · Week {currentWeek}</h2>
                 </div>
                 <div className="flex gap-2">
                   <button
