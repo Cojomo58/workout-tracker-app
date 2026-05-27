@@ -1156,6 +1156,71 @@ const WorkoutTracker = () => {
     }
   };
 
+  const handleSetWeek1AsTemplate = () => {
+    const allDays = ['monday','tuesday','wednesday','thursday','friday','saturday','sunday'];
+    const hasData = allDays.some(day =>
+      workoutLogs[`block${currentBlock}-week1-${day}`]?.exercises?.length > 0
+    );
+    if (!hasData) return;
+    if (!window.confirm(
+      'Use your Week 1 workouts as the template baseline?\n\nThis updates each day\'s exercises and default % of TM. Weekly progressions you\'ve already set are kept.'
+    )) return;
+
+    const newBlocks = [...blocks];
+
+    allDays.forEach(day => {
+      const log = workoutLogs[`block${currentBlock}-week1-${day}`];
+      if (!log?.exercises?.length) return;
+
+      const existingDay = newBlocks[0].template[day] || {
+        name: day.charAt(0).toUpperCase() + day.slice(1),
+        exercises: []
+      };
+
+      const newExercises = log.exercises.map(logEx => {
+        const exType = logEx.type || 'strength';
+        const existingEx = existingDay.exercises.find(t => t.name === logEx.name);
+
+        let percentage;
+        let reps = '';
+
+        if (exType === 'strength') {
+          const weights = logEx.sets.map(s => parseFloat(s.weight)).filter(w => w > 0);
+          const tmKey = existingEx?.tmLink || logEx.name;
+          const tm = trainingMaxes[tmKey];
+          if (tm && weights.length > 0) {
+            const avg = weights.reduce((a, b) => a + b, 0) / weights.length;
+            percentage = Math.round(avg / tm.trainingMax * 100);
+          }
+          reps = logEx.sets[0]?.reps || '';
+        } else if (exType === 'tabata') {
+          reps = `${logEx.sets[0]?.rounds || 8} rounds`;
+        } else if (exType === 'cardio') {
+          const s = logEx.sets[0];
+          reps = s?.distance ? `${s.distance} ${s.unit || 'miles'}` : '';
+        } else if (exType === 'bodyweight') {
+          reps = logEx.sets[0]?.reps || '';
+        }
+
+        return {
+          name: logEx.name,
+          ...(exType !== 'strength' && { type: exType }),
+          sets: String(logEx.sets.length),
+          reps,
+          technique: logEx.technique || existingEx?.technique || '',
+          rest: existingEx?.rest || '',
+          ...(percentage !== undefined && { percentage }),
+          ...(existingEx?.tmLink && { tmLink: existingEx.tmLink }),
+          ...(existingEx?.weeklyProgression?.length && { weeklyProgression: existingEx.weeklyProgression }),
+        };
+      });
+
+      newBlocks[0].template[day] = { ...existingDay, exercises: newExercises };
+    });
+
+    setBlocks(newBlocks);
+  };
+
   const handleLogout = async () => {
     if (!supabase) return;
     await supabase.auth.signOut();
@@ -2457,8 +2522,24 @@ const WorkoutTracker = () => {
         {view === 'calendar' && (
           <div className="space-y-6">
             <div className="space-y-3">
-              {/* New Cycle button */}
-              <div className="flex justify-end">
+              {/* Action buttons */}
+              <div className="flex justify-end gap-2">
+                {(() => {
+                  const allDays = ['monday','tuesday','wednesday','thursday','friday','saturday','sunday'];
+                  const week1HasData = allDays.some(day =>
+                    workoutLogs[`block${currentBlock}-week1-${day}`]?.exercises?.length > 0
+                  );
+                  return week1HasData ? (
+                    <button
+                      onClick={handleSetWeek1AsTemplate}
+                      className="px-3 py-1.5 bg-violet-700 hover:bg-violet-600 text-white rounded-lg text-xs font-medium flex items-center gap-1"
+                      title="Copy your Week 1 workouts into the template as the baseline"
+                    >
+                      <Edit3 className="w-3.5 h-3.5" />
+                      Set as Template
+                    </button>
+                  ) : null;
+                })()}
                 <button
                   onClick={() => {
                     if (!window.confirm("Start a new training cycle? You'll return to Week 1.")) return;
