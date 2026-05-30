@@ -2616,17 +2616,32 @@ const WorkoutTracker = () => {
                         const prevWeekLog = prevWeekKey ? workoutLogs[prevWeekKey] : null;
 
                         if (prevWeekLog && prevWeekLog.exercises && prevWeekLog.exercises.length > 0) {
-                          // Find matching template exercise to pull templateTarget/templatePercentage
                           const templateExercises = workout?.exercises || [];
                           setExercises(prevWeekLog.exercises.map(ex => {
                             const exType = ex.type || 'strength';
                             const tmplEx = templateExercises.find(t => t.name === ex.name);
+
+                            // If template has a weekly progression for this week, use it to set weight
+                            const weekOverride = tmplEx?.weeklyProgression?.find(w => w.week === currentWeek) ?? null;
+                            const effectivePct  = weekOverride?.percentage ?? null;
+                            const effectiveSets = weekOverride?.sets ?? null;
+                            const effectiveReps = weekOverride?.reps ?? null;
+
+                            const tmLookup = tmplEx?.tmLink || ex.name;
+                            const pctWeight = (effectivePct && exType === 'strength')
+                              ? getPercentageWeight(tmLookup, effectivePct)
+                              : null;
+                            const targetReps = effectiveReps ? parseTargetReps(effectiveReps) : null;
+
                             return {
                               name: ex.name,
                               type: exType,
                               technique: ex.technique,
-                              templateTarget: tmplEx ? `${tmplEx.sets}×${tmplEx.reps}` : null,
-                              templatePercentage: tmplEx?.percentage || null,
+                              templateTarget: (effectiveSets && effectiveReps)
+                                ? `${effectiveSets}×${effectiveReps}`
+                                : (tmplEx ? `${tmplEx.sets}×${tmplEx.reps}` : null),
+                              templatePercentage: effectivePct || tmplEx?.percentage || null,
+                              templateReps: effectiveReps || tmplEx?.reps || null,
                               tmLink: tmplEx?.tmLink || null,
                               sets: ex.sets.map(s =>
                                 exType === 'bodyweight'
@@ -2635,7 +2650,11 @@ const WorkoutTracker = () => {
                                     ? { distance: s.distance || '', time: s.time || '', unit: s.unit || 'miles' }
                                     : exType === 'tabata'
                                       ? { rounds: s.rounds || '', workSeconds: s.workSeconds || '20', restSeconds: s.restSeconds || '10', calories: s.calories || '' }
-                                      : { weight: s.weight || '', reps: s.reps || '' }
+                                      : {
+                                          weight: pctWeight ? String(pctWeight) : (s.weight || ''),
+                                          reps: targetReps || s.reps || '',
+                                          ...(pctWeight ? { weightSource: 'tm-pct' } : {})
+                                        }
                               ),
                               notes: ex.notes || ''
                             };
