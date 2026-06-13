@@ -4,6 +4,8 @@ import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContai
 import Fuse from 'fuse.js';
 import { supabase } from './supabaseClient';
 
+const DEFAULT_TM_PERCENT = 90;
+
 const WorkoutTracker = () => {
   const [view, setView] = useState('calendar');
   const [currentBlock, setCurrentBlock] = useState(1);
@@ -80,7 +82,7 @@ const WorkoutTracker = () => {
   const [tmModalCalcWeight, setTmModalCalcWeight] = useState('');
   const [tmModalCalcReps, setTmModalCalcReps] = useState('');
   const [tmModalTrueRM, setTmModalTrueRM] = useState('');
-  const [tmModalPercent, setTmModalPercent] = useState('90');
+  const [tmModalPercent, setTmModalPercent] = useState(String(DEFAULT_TM_PERCENT));
 
   // Charts State
   const [chartType, setChartType] = useState('weight');
@@ -106,24 +108,6 @@ const WorkoutTracker = () => {
   // Migrate PRs from historical workout data
   const migrateHistoricalPRs = (logs) => {
     const migratedPRs = {};
-
-    // Helper for time parsing during migration
-    const parseTime = (timeStr) => {
-      if (!timeStr) return 0;
-      const parts = timeStr.split(':').map(p => parseInt(p) || 0);
-      if (parts.length === 3) return parts[0] * 3600 + parts[1] * 60 + parts[2];
-      if (parts.length === 2) return parts[0] * 60 + parts[1];
-      return parseInt(timeStr) || 0;
-    };
-
-    const formatTime = (seconds) => {
-      if (!seconds || seconds <= 0) return '0:00';
-      const hrs = Math.floor(seconds / 3600);
-      const mins = Math.floor((seconds % 3600) / 60);
-      const secs = Math.round(seconds % 60);
-      if (hrs > 0) return `${hrs}:${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
-      return `${mins}:${secs.toString().padStart(2, '0')}`;
-    };
 
     Object.entries(logs).forEach(([logKey, log]) => {
       if (!log.exercises || !log.date) return;
@@ -155,7 +139,7 @@ const WorkoutTracker = () => {
           // Cardio PR migration
           exercise.sets.forEach(set => {
             const distance = parseFloat(set.distance);
-            const timeSeconds = parseTime(set.time);
+            const timeSeconds = parseTimeToSeconds(set.time);
 
             if (!distance || !timeSeconds) return;
 
@@ -176,7 +160,7 @@ const WorkoutTracker = () => {
             if (!migratedPRs[exerciseName].fastestPace || paceSeconds < migratedPRs[exerciseName].fastestPace.value) {
               migratedPRs[exerciseName].fastestPace = {
                 value: paceSeconds,
-                displayValue: formatTime(Math.round(paceSeconds)),
+                displayValue: formatSecondsToTime(Math.round(paceSeconds)),
                 distance,
                 unit: set.unit || 'miles',
                 time: set.time,
@@ -299,7 +283,6 @@ const WorkoutTracker = () => {
       const savedTM = localStorage.getItem('training-maxes');
       if (savedTM) setTrainingMaxes(JSON.parse(savedTM));
     } catch (error) {
-      console.log('Error loading data:', error);
       console.error('Error loading saved data');
     }
   };
@@ -346,7 +329,7 @@ const WorkoutTracker = () => {
       if (data.block_metadata) localStorage.setItem('block-metadata', JSON.stringify(data.block_metadata));
       if (data.training_maxes) localStorage.setItem('training-maxes', JSON.stringify(data.training_maxes));
     } catch (e) {
-      console.log('Error caching to localStorage:', e);
+      console.error('Error caching to localStorage:', e);
     }
   };
 
@@ -570,7 +553,7 @@ const WorkoutTracker = () => {
     return { weight: roundToNearest2_5(base * pct / 100), pct, source: trainingMaxes[exerciseName] ? 'tm' : 'e1rm' };
   };
 
-  const saveTrainingMax = (exerciseName, true1RM, pct = 90) => {
+  const saveTrainingMax = (exerciseName, true1RM, pct = DEFAULT_TM_PERCENT) => {
     setTrainingMaxes(prev => {
       const existing = prev[exerciseName];
       const prevHistory = existing?.history || [];
@@ -1372,7 +1355,7 @@ const WorkoutTracker = () => {
                   <span className="text-xs text-gray-400 hidden md:inline">{user.email}</span>
                   <button
                     onClick={handleLogout}
-                    className="px-2 py-1 bg-gray-700 hover:bg-gray-600 text-gray-300 rounded text-xs flex items-center gap-1"
+                    className="px-2 py-1 bg-gray-700 hover:bg-gray-600 text-gray-300 rounded-lg text-xs flex items-center gap-1 transition-colors"
                     title="Sign out of cloud sync"
                   >
                     <LogOut className="w-3 h-3" />
@@ -1382,7 +1365,7 @@ const WorkoutTracker = () => {
               ) : (
                 <button
                   onClick={() => setShowAuthModal(true)}
-                  className="px-3 py-1 bg-blue-600 hover:bg-blue-700 text-white rounded text-sm flex items-center gap-1"
+                  className="px-3 py-1 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-sm flex items-center gap-1 transition-colors"
                   title="Sign in to sync data across devices"
                 >
                   <LogIn className="w-3 h-3" />
@@ -1394,38 +1377,38 @@ const WorkoutTracker = () => {
         </div>
       </div>
 
-      <div className="flex gap-1 md:gap-2 mb-6 border-b border-gray-700">
+      <div className="flex gap-1 mb-6 p-1 bg-gray-800 rounded-xl border border-gray-700">
         <button
           onClick={() => setView('calendar')}
-          className={`px-3 py-2 md:px-4 md:py-3 text-sm md:text-base font-medium transition-colors ${
+          className={`flex-1 flex items-center justify-center gap-1.5 px-3 py-2 md:px-4 md:py-2.5 text-sm md:text-base font-medium rounded-lg transition-colors ${
             view === 'calendar'
-              ? 'text-emerald-400 border-b-2 border-emerald-400'
-              : 'text-gray-400 hover:text-gray-200'
+              ? 'bg-gray-700 text-emerald-400 shadow-sm'
+              : 'text-gray-400 hover:text-gray-200 hover:bg-gray-700/50'
           }`}
         >
-          <Calendar className="w-4 h-4 inline mr-1 md:mr-2" />
+          <Calendar className="w-4 h-4" />
           Calendar
         </button>
         <button
           onClick={() => setView('progress')}
-          className={`px-3 py-2 md:px-4 md:py-3 text-sm md:text-base font-medium transition-colors ${
+          className={`flex-1 flex items-center justify-center gap-1.5 px-3 py-2 md:px-4 md:py-2.5 text-sm md:text-base font-medium rounded-lg transition-colors ${
             view === 'progress'
-              ? 'text-emerald-400 border-b-2 border-emerald-400'
-              : 'text-gray-400 hover:text-gray-200'
+              ? 'bg-gray-700 text-emerald-400 shadow-sm'
+              : 'text-gray-400 hover:text-gray-200 hover:bg-gray-700/50'
           }`}
         >
-          <TrendingUp className="w-4 h-4 inline mr-1 md:mr-2" />
+          <TrendingUp className="w-4 h-4" />
           Progress
         </button>
         <button
           onClick={() => setView('template')}
-          className={`px-3 py-2 md:px-4 md:py-3 text-sm md:text-base font-medium transition-colors ${
+          className={`flex-1 flex items-center justify-center gap-1.5 px-3 py-2 md:px-4 md:py-2.5 text-sm md:text-base font-medium rounded-lg transition-colors ${
             view === 'template'
-              ? 'text-emerald-400 border-b-2 border-emerald-400'
-              : 'text-gray-400 hover:text-gray-200'
+              ? 'bg-gray-700 text-emerald-400 shadow-sm'
+              : 'text-gray-400 hover:text-gray-200 hover:bg-gray-700/50'
           }`}
         >
-          <Settings className="w-4 h-4 inline mr-1 md:mr-2" />
+          <Settings className="w-4 h-4" />
           Template
         </button>
       </div>
@@ -1464,12 +1447,12 @@ const WorkoutTracker = () => {
                     setTmModalExercise('');
                     setTmModalIsNew(true);
                     setTmModalTrueRM('');
-                    setTmModalPercent('90');
+                    setTmModalPercent(String(DEFAULT_TM_PERCENT));
                     setTmModalCalcWeight('');
                     setTmModalCalcReps('');
                     setShowTMModal(true);
                   }}
-                  className="text-xs px-3 py-1 bg-purple-700/40 hover:bg-purple-700/60 text-purple-300 rounded border border-purple-700/50 flex items-center gap-1"
+                  className="text-xs px-3 py-1 bg-purple-700/40 hover:bg-purple-700/60 text-purple-300 rounded-lg border border-purple-700/50 flex items-center gap-1"
                 >
                   <Plus className="w-3 h-3" /> Add
                 </button>
@@ -1506,7 +1489,7 @@ const WorkoutTracker = () => {
                           setTmModalCalcReps('');
                           setShowTMModal(true);
                         }}
-                        className="p-2 bg-gray-700 hover:bg-gray-600 text-gray-300 rounded"
+                        className="p-2 bg-gray-700 hover:bg-gray-600 text-gray-300 rounded-lg transition-colors"
                         title="Edit training max"
                       >
                         <Edit3 className="w-4 h-4" />
@@ -1550,15 +1533,15 @@ const WorkoutTracker = () => {
                                   if (e.key === 'Escape') setExRenameTarget(null);
                                 }}
                                 autoFocus
-                                className="flex-1 px-2 py-1 bg-gray-600 border border-purple-500 rounded text-gray-100 text-sm"
+                                className="flex-1 px-2 py-1 bg-gray-600 border border-purple-500 rounded-lg text-gray-100 text-sm"
                               />
                               <button
                                 onClick={() => { renameExercise(name, exRenameValue); setExRenameTarget(null); }}
-                                className="text-xs px-2 py-1 bg-emerald-600 hover:bg-emerald-700 text-white rounded"
+                                className="text-xs px-2 py-1 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg"
                               >Save</button>
                               <button
                                 onClick={() => setExRenameTarget(null)}
-                                className="text-xs px-2 py-1 bg-gray-600 hover:bg-gray-500 text-gray-300 rounded"
+                                className="text-xs px-2 py-1 bg-gray-600 hover:bg-gray-500 text-gray-300 rounded-lg"
                               >Cancel</button>
                             </>
                           ) : (
@@ -1661,7 +1644,7 @@ const WorkoutTracker = () => {
                       <div className="flex gap-2 mb-4">
                         <button
                           onClick={() => setChartType('reps')}
-                          className={`px-3 py-1 rounded text-sm transition-colors ${
+                          className={`px-3 py-1 rounded-lg text-sm transition-colors ${
                             chartType === 'reps'
                               ? 'bg-violet-600 text-white'
                               : 'bg-gray-700 text-gray-300 hover:bg-gray-600'
@@ -1671,7 +1654,7 @@ const WorkoutTracker = () => {
                         </button>
                         <button
                           onClick={() => setChartType('holdTime')}
-                          className={`px-3 py-1 rounded text-sm transition-colors ${
+                          className={`px-3 py-1 rounded-lg text-sm transition-colors ${
                             chartType === 'holdTime'
                               ? 'bg-violet-600 text-white'
                               : 'bg-gray-700 text-gray-300 hover:bg-gray-600'
@@ -1688,7 +1671,7 @@ const WorkoutTracker = () => {
                       <div className="flex gap-2 mb-4">
                         <button
                           onClick={() => setChartType('distance')}
-                          className={`px-3 py-1 rounded text-sm transition-colors ${
+                          className={`px-3 py-1 rounded-lg text-sm transition-colors ${
                             chartType === 'distance'
                               ? 'bg-blue-600 text-white'
                               : 'bg-gray-700 text-gray-300 hover:bg-gray-600'
@@ -1698,7 +1681,7 @@ const WorkoutTracker = () => {
                         </button>
                         <button
                           onClick={() => setChartType('pace')}
-                          className={`px-3 py-1 rounded text-sm transition-colors ${
+                          className={`px-3 py-1 rounded-lg text-sm transition-colors ${
                             chartType === 'pace'
                               ? 'bg-blue-600 text-white'
                               : 'bg-gray-700 text-gray-300 hover:bg-gray-600'
@@ -1708,7 +1691,7 @@ const WorkoutTracker = () => {
                         </button>
                         <button
                           onClick={() => setChartType('duration')}
-                          className={`px-3 py-1 rounded text-sm transition-colors ${
+                          className={`px-3 py-1 rounded-lg text-sm transition-colors ${
                             chartType === 'duration'
                               ? 'bg-blue-600 text-white'
                               : 'bg-gray-700 text-gray-300 hover:bg-gray-600'
@@ -1725,7 +1708,7 @@ const WorkoutTracker = () => {
                       <div className="flex gap-2 mb-4">
                         <button
                           onClick={() => setChartType('rounds')}
-                          className={`px-3 py-1 rounded text-sm transition-colors ${
+                          className={`px-3 py-1 rounded-lg text-sm transition-colors ${
                             chartType === 'rounds'
                               ? 'bg-orange-600 text-white'
                               : 'bg-gray-700 text-gray-300 hover:bg-gray-600'
@@ -1735,7 +1718,7 @@ const WorkoutTracker = () => {
                         </button>
                         <button
                           onClick={() => setChartType('sets')}
-                          className={`px-3 py-1 rounded text-sm transition-colors ${
+                          className={`px-3 py-1 rounded-lg text-sm transition-colors ${
                             chartType === 'sets'
                               ? 'bg-orange-600 text-white'
                               : 'bg-gray-700 text-gray-300 hover:bg-gray-600'
@@ -1751,7 +1734,7 @@ const WorkoutTracker = () => {
                     <div className="flex gap-2 mb-4">
                       <button
                         onClick={() => setChartType('weight')}
-                        className={`px-3 py-1 rounded text-sm transition-colors ${
+                        className={`px-3 py-1 rounded-lg text-sm transition-colors ${
                           chartType === 'weight'
                             ? 'bg-emerald-600 text-white'
                             : 'bg-gray-700 text-gray-300 hover:bg-gray-600'
@@ -1761,7 +1744,7 @@ const WorkoutTracker = () => {
                       </button>
                       <button
                         onClick={() => setChartType('volume')}
-                        className={`px-3 py-1 rounded text-sm transition-colors ${
+                        className={`px-3 py-1 rounded-lg text-sm transition-colors ${
                           chartType === 'volume'
                             ? 'bg-emerald-600 text-white'
                             : 'bg-gray-700 text-gray-300 hover:bg-gray-600'
@@ -1771,7 +1754,7 @@ const WorkoutTracker = () => {
                       </button>
                       <button
                         onClick={() => setChartType('reps')}
-                        className={`px-3 py-1 rounded text-sm transition-colors ${
+                        className={`px-3 py-1 rounded-lg text-sm transition-colors ${
                           chartType === 'reps'
                             ? 'bg-emerald-600 text-white'
                             : 'bg-gray-700 text-gray-300 hover:bg-gray-600'
@@ -1871,12 +1854,12 @@ const WorkoutTracker = () => {
                               setTmModalExercise(selectedExerciseHistory);
                               setTmModalIsNew(!trainingMaxes[selectedExerciseHistory]);
                               setTmModalTrueRM(String(personalRecords[selectedExerciseHistory].estimated1RM.value));
-                              setTmModalPercent(String(trainingMaxes[selectedExerciseHistory]?.trainingMaxPercent || 90));
+                              setTmModalPercent(String(trainingMaxes[selectedExerciseHistory]?.trainingMaxPercent || DEFAULT_TM_PERCENT));
                               setTmModalCalcWeight('');
                               setTmModalCalcReps('');
                               setShowTMModal(true);
                             }}
-                            className="mt-2 w-full text-xs py-1 px-2 bg-purple-700/40 hover:bg-purple-700/60 text-purple-300 rounded border border-purple-700/50"
+                            className="mt-2 w-full text-xs py-1 px-2 bg-purple-700/40 hover:bg-purple-700/60 text-purple-300 rounded-lg border border-purple-700/50"
                           >
                             {trainingMaxes[selectedExerciseHistory] ? 'Update Training Max' : 'Set as Training Max'}
                           </button>
@@ -2257,7 +2240,7 @@ const WorkoutTracker = () => {
                                             newBlocks[0].template[dayKey].exercises[exIdx].sets = e.target.value;
                                             setBlocks(newBlocks);
                                           }}
-                                          className="w-full px-2 py-1 bg-gray-700 border border-gray-600 rounded text-gray-100 text-sm"
+                                          className="w-full px-2 py-1 bg-gray-700 border border-gray-600 rounded-lg text-gray-100 text-sm"
                                           placeholder="3"
                                         />
                                       </div>
@@ -2271,7 +2254,7 @@ const WorkoutTracker = () => {
                                             newBlocks[0].template[dayKey].exercises[exIdx].reps = e.target.value;
                                             setBlocks(newBlocks);
                                           }}
-                                          className="w-full px-2 py-1 bg-gray-700 border border-gray-600 rounded text-gray-100 text-sm"
+                                          className="w-full px-2 py-1 bg-gray-700 border border-gray-600 rounded-lg text-gray-100 text-sm"
                                           placeholder="8-12"
                                         />
                                       </div>
@@ -2285,7 +2268,7 @@ const WorkoutTracker = () => {
                                             newBlocks[0].template[dayKey].exercises[exIdx].technique = e.target.value;
                                             setBlocks(newBlocks);
                                           }}
-                                          className="w-full px-2 py-1 bg-gray-700 border border-gray-600 rounded text-gray-100 text-sm"
+                                          className="w-full px-2 py-1 bg-gray-700 border border-gray-600 rounded-lg text-gray-100 text-sm"
                                           placeholder="Failure"
                                         />
                                       </div>
@@ -2299,7 +2282,7 @@ const WorkoutTracker = () => {
                                             newBlocks[0].template[dayKey].exercises[exIdx].rest = e.target.value;
                                             setBlocks(newBlocks);
                                           }}
-                                          className="w-full px-2 py-1 bg-gray-700 border border-gray-600 rounded text-gray-100 text-sm"
+                                          className="w-full px-2 py-1 bg-gray-700 border border-gray-600 rounded-lg text-gray-100 text-sm"
                                           placeholder="2-3 min"
                                         />
                                       </div>
@@ -2317,7 +2300,7 @@ const WorkoutTracker = () => {
                                             newBlocks[0].template[dayKey].exercises[exIdx].percentage = val ? parseInt(val) : undefined;
                                             setBlocks(newBlocks);
                                           }}
-                                          className="w-full px-2 py-1 bg-gray-700 border border-gray-600 rounded text-gray-100 text-sm"
+                                          className="w-full px-2 py-1 bg-gray-700 border border-gray-600 rounded-lg text-gray-100 text-sm"
                                         />
                                         {(() => {
                                           const tmKey = exercise.tmLink || exercise.name;
@@ -2339,7 +2322,7 @@ const WorkoutTracker = () => {
                                             newBlocks[0].template[dayKey].exercises[exIdx].tmLink = val || undefined;
                                             setBlocks(newBlocks);
                                           }}
-                                          className="w-full px-2 py-1 bg-gray-700 border border-gray-600 rounded text-gray-100 text-sm mt-1"
+                                          className="w-full px-2 py-1 bg-gray-700 border border-gray-600 rounded-lg text-gray-100 text-sm mt-1"
                                         >
                                           <option value="">— match by name —</option>
                                           {Object.keys(trainingMaxes).map(name => (
@@ -2392,7 +2375,7 @@ const WorkoutTracker = () => {
                                           newBlocks[0].template[dayKey].exercises[exIdx].weeklyProgression[wIdx].percentage = e.target.value ? parseFloat(e.target.value) : '';
                                           setBlocks(newBlocks);
                                         }}
-                                        className="w-full px-1 py-0.5 bg-gray-700 border border-gray-600 rounded text-gray-100"
+                                        className="w-full px-1 py-0.5 bg-gray-700 border border-gray-600 rounded-lg text-gray-100"
                                       />
                                       <input
                                         type="text"
@@ -2404,7 +2387,7 @@ const WorkoutTracker = () => {
                                           newBlocks[0].template[dayKey].exercises[exIdx].weeklyProgression[wIdx].sets = e.target.value;
                                           setBlocks(newBlocks);
                                         }}
-                                        className="w-full px-1 py-0.5 bg-gray-700 border border-gray-600 rounded text-gray-100"
+                                        className="w-full px-1 py-0.5 bg-gray-700 border border-gray-600 rounded-lg text-gray-100"
                                       />
                                       <input
                                         type="text"
@@ -2415,7 +2398,7 @@ const WorkoutTracker = () => {
                                           newBlocks[0].template[dayKey].exercises[exIdx].weeklyProgression[wIdx].reps = e.target.value;
                                           setBlocks(newBlocks);
                                         }}
-                                        className="w-full px-1 py-0.5 bg-gray-700 border border-gray-600 rounded text-gray-100"
+                                        className="w-full px-1 py-0.5 bg-gray-700 border border-gray-600 rounded-lg text-gray-100"
                                       />
                                       <span className="text-purple-400 whitespace-nowrap">
                                         {(() => {
@@ -3033,7 +3016,7 @@ const WorkoutTracker = () => {
                                 setExercises(newExercises);
                               }
                             }}
-                            className={`px-3 py-1 rounded text-xs font-medium transition-colors ${isActive ? activeClass : 'bg-gray-600 text-gray-300 hover:bg-gray-500'}`}
+                            className={`px-3 py-1 rounded-lg text-xs font-medium transition-colors ${isActive ? activeClass : 'bg-gray-600 text-gray-300 hover:bg-gray-500'}`}
                             title={title}
                           >
                             {label}
@@ -3060,7 +3043,7 @@ const WorkoutTracker = () => {
                                     : [{ weight: '', reps: '' }];
                               setExercises(newExercises);
                             }}
-                            className="text-xs px-2 py-1 bg-orange-700 hover:bg-orange-600 text-white rounded"
+                            className="text-xs px-2 py-1 bg-orange-700 hover:bg-orange-600 text-white rounded-lg"
                           >
                             Confirm
                           </button>
@@ -3070,7 +3053,7 @@ const WorkoutTracker = () => {
                               newExercises[exIdx].pendingTypeChange = null;
                               setExercises(newExercises);
                             }}
-                            className="text-xs px-2 py-1 bg-gray-600 hover:bg-gray-500 text-gray-300 rounded"
+                            className="text-xs px-2 py-1 bg-gray-600 hover:bg-gray-500 text-gray-300 rounded-lg"
                           >
                             Cancel
                           </button>
@@ -3712,7 +3695,7 @@ const WorkoutTracker = () => {
                         ) : (
                           <button
                             onClick={() => {
-                              const existingPct = trainingMaxes[pr.exerciseName]?.trainingMaxPercent || 90;
+                              const existingPct = trainingMaxes[pr.exerciseName]?.trainingMaxPercent || DEFAULT_TM_PERCENT;
                               saveTrainingMax(pr.exerciseName, pr.value, existingPct);
                               setPrTMSaved(prev => ({ ...prev, [idx]: true }));
                             }}
@@ -3903,7 +3886,7 @@ const WorkoutTracker = () => {
                   <button
                     disabled={!tmModalCalcWeight || !tmModalCalcReps || parseInt(tmModalCalcReps) <= 0}
                     onClick={() => setTmModalTrueRM(String(calculateEstimated1RM(tmModalCalcWeight, tmModalCalcReps)))}
-                    className="text-xs px-3 py-2 bg-purple-700/40 hover:bg-purple-700/60 disabled:opacity-40 disabled:cursor-not-allowed text-purple-300 rounded border border-purple-700/50 whitespace-nowrap"
+                    className="text-xs px-3 py-2 bg-purple-700/40 hover:bg-purple-700/60 disabled:opacity-40 disabled:cursor-not-allowed text-purple-300 rounded-lg border border-purple-700/50 whitespace-nowrap"
                   >
                     Use as 1RM
                   </button>
@@ -3973,7 +3956,7 @@ const WorkoutTracker = () => {
 
       {/* Auth Modal */}
       {showAuthModal && (
-        <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-50 p-4">
+        <div className="fixed inset-0 bg-black/80 flex items-center justify-center z-50 p-4">
           <div className="bg-gray-800 border border-gray-700 rounded-xl p-6 max-w-sm w-full">
             <div className="flex justify-between items-center mb-4">
               <h2 className="text-xl font-bold text-gray-100">
@@ -3997,7 +3980,7 @@ const WorkoutTracker = () => {
                 value={authEmail}
                 onChange={e => setAuthEmail(e.target.value)}
                 required
-                className="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded text-gray-100 text-sm focus:outline-none focus:border-blue-500"
+                className="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded-lg text-gray-100 text-sm focus:outline-none focus:border-blue-500"
               />
               <input
                 type="password"
@@ -4006,14 +3989,14 @@ const WorkoutTracker = () => {
                 onChange={e => setAuthPassword(e.target.value)}
                 required
                 minLength={6}
-                className="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded text-gray-100 text-sm focus:outline-none focus:border-blue-500"
+                className="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded-lg text-gray-100 text-sm focus:outline-none focus:border-blue-500"
               />
               {authError && (
                 <p className="text-red-400 text-xs">{authError}</p>
               )}
               <button
                 type="submit"
-                className="w-full py-2 bg-blue-600 hover:bg-blue-700 text-white rounded font-medium"
+                className="w-full py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-medium transition-colors"
               >
                 {authMode === 'login' ? 'Sign In' : 'Sign Up'}
               </button>
