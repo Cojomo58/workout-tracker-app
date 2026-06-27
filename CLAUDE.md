@@ -4,11 +4,11 @@
 React-based workout tracking application for logging strength training, cardio, and Tabata/HIIT workouts with progression analytics and personal record tracking. Supports cloud sync via Supabase with offline-first localStorage fallback. Organizes workouts into named training cycles (blocks) with multi-week navigation. Supports percentage-based programming via per-exercise training maxes.
 
 ## Tech Stack
-- **Frontend**: React 18 (single-page application)
-- **Build Tool**: Vite 6
-- **Styling**: Tailwind CSS 3.4
+- **Frontend**: React 19 (single-page application)
+- **Build Tool**: Vite 8 (uses Rolldown bundler — ~3x faster builds)
+- **Styling**: Tailwind CSS 4.3 (Vite plugin, no postcss.config.js or tailwind.config.js)
 - **Charts**: Recharts 3.7
-- **Icons**: Lucide React
+- **Icons**: Lucide React 1.x
 - **Search**: Fuse.js (fuzzy search)
 - **Backend**: Supabase (PostgreSQL + Auth) -- optional, app works without it
 - **Storage**: Dual -- localStorage (always) + Supabase cloud (when logged in)
@@ -17,17 +17,17 @@ React-based workout tracking application for logging strength training, cardio, 
 ```
 workout-tracker-app/
 ├── src/
-│   ├── App.jsx            # Main component (monolithic)
+│   ├── App.jsx            # Main component (monolithic) — includes ExerciseTypeBadge + ModalHeader above WorkoutTracker
 │   ├── supabaseClient.js  # Supabase client singleton
 │   ├── main.jsx           # React entry point
-│   └── index.css          # Tailwind imports + custom CSS
+│   └── index.css          # @import "tailwindcss" + @theme block (custom colors/animations)
 ├── .env.local             # Supabase credentials (gitignored)
 ├── index.html             # HTML template
 ├── package.json           # Dependencies
-├── vite.config.js         # Vite config (base: /workout-tracker-app/)
-├── tailwind.config.js     # Custom colors (gold, volume) and animations
-└── postcss.config.js      # PostCSS with Tailwind + Autoprefixer
+└── vite.config.js         # Vite config — includes @tailwindcss/vite plugin + base: /workout-tracker-app/
 ```
+Note: `tailwind.config.js` and `postcss.config.js` were removed in the Tailwind 4 migration.
+Custom theme tokens (gold/volume colors, pr-bounce/timer-pulse animations) live in `src/index.css` under `@theme`.
 
 ## Key Data Structures
 
