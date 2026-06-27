@@ -75,7 +75,7 @@ A comprehensive periodized workout tracking application built with React. Track 
 
 ### Prerequisites
 
-- Node.js 18.x or higher
+- Node.js 20.19+ or 22.12+ (required by Vite 8 / Rolldown)
 - npm (comes with Node.js)
 
 ### Installation
@@ -173,11 +173,11 @@ Export/import works regardless of whether you're signed in.
 
 ## Tech Stack
 
-- **React 18**: UI framework
-- **Vite 6**: Build tool and dev server
-- **Tailwind CSS 3.4**: Styling
+- **React 19**: UI framework
+- **Vite 8** (Rolldown): Build tool and dev server
+- **Tailwind CSS 4.3**: Styling (Vite plugin, CSS-based config via `@theme`)
 - **Recharts**: Progress visualization charts
-- **Lucide React**: Icons
+- **Lucide React 1.x**: Icons
 - **Fuse.js**: Fuzzy search for exercise names
 - **Supabase**: Auth + PostgreSQL cloud sync (optional)
 - **localStorage**: Offline data persistence
@@ -190,12 +190,11 @@ workout-tracker-app/
 │   ├── App.jsx            # Main application component
 │   ├── supabaseClient.js  # Supabase client singleton
 │   ├── main.jsx           # Application entry point
-│   └── index.css          # Global styles and animations
+│   └── index.css          # Tailwind import + @theme (custom colors/animations)
 ├── .env.local             # Supabase credentials (gitignored)
 ├── index.html             # HTML template
 ├── package.json           # Dependencies and scripts
-├── vite.config.js         # Vite configuration
-└── tailwind.config.js     # Tailwind configuration
+└── vite.config.js         # Vite + @tailwindcss/vite plugin configuration
 ```
 
 ## Environment Variables
