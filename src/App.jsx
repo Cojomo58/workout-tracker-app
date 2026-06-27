@@ -6,6 +6,30 @@ import { supabase } from './supabaseClient';
 
 const DEFAULT_TM_PERCENT = 90;
 
+function ExerciseTypeBadge({ type }) {
+  const styles = {
+    cardio: 'bg-blue-900/50 text-blue-400',
+    tabata: 'bg-orange-900/50 text-orange-400',
+    bodyweight: 'bg-violet-900/50 text-violet-400',
+  };
+  return (
+    <span className={`text-xs px-2 py-0.5 rounded ${styles[type] ?? 'bg-emerald-900/50 text-emerald-400'}`}>
+      {type}
+    </span>
+  );
+}
+
+function ModalHeader({ title, onClose }) {
+  return (
+    <div className="flex justify-between items-center mb-4">
+      <h2 className="text-lg font-bold text-gray-100">{title}</h2>
+      <button onClick={onClose} className="text-gray-400 hover:text-gray-200">
+        <X className="w-5 h-5" />
+      </button>
+    </div>
+  );
+}
+
 const WorkoutTracker = () => {
   const [view, setView] = useState('calendar');
   const [currentBlock, setCurrentBlock] = useState(1);
@@ -2018,17 +2042,7 @@ const WorkoutTracker = () => {
                                 <span className="text-sm font-medium text-gray-100">
                                   {formatDate(entry.date)}
                                 </span>
-                                <span className={`text-xs px-2 py-0.5 rounded ${
-                                  entryType === 'cardio'
-                                    ? 'bg-blue-900/50 text-blue-400'
-                                    : entryType === 'tabata'
-                                      ? 'bg-orange-900/50 text-orange-400'
-                                      : entryType === 'bodyweight'
-                                        ? 'bg-violet-900/50 text-violet-400'
-                                        : 'bg-emerald-900/50 text-emerald-400'
-                                }`}>
-                                  {entryType}
-                                </span>
+                                <ExerciseTypeBadge type={entryType} />
                               </div>
                               <div className="space-y-1">
                                 {entry.sets && entry.sets.map((set, setIdx) => (
@@ -3067,17 +3081,7 @@ const WorkoutTracker = () => {
                       <div className="mb-3 p-3 bg-blue-950/30 border border-blue-900/50 rounded-lg">
                         <div className="flex items-center justify-between mb-2">
                           <span className="text-xs font-medium text-blue-400">Last Session ({formatDate(previousSession.date)})</span>
-                          <span className={`text-xs px-2 py-0.5 rounded ${
-                            (previousSession.type || 'strength') === 'cardio'
-                              ? 'bg-blue-900/50 text-blue-400'
-                              : (previousSession.type || 'strength') === 'tabata'
-                                ? 'bg-orange-900/50 text-orange-400'
-                                : (previousSession.type || 'strength') === 'bodyweight'
-                                  ? 'bg-violet-900/50 text-violet-400'
-                                  : 'bg-emerald-900/50 text-emerald-400'
-                          }`}>
-                            {previousSession.type || 'strength'}
-                          </span>
+                          <ExerciseTypeBadge type={previousSession.type || 'strength'} />
                         </div>
                         <div className="flex gap-2 flex-wrap">
                           {previousSession.sets?.map((prevSet, idx) => (
@@ -3794,15 +3798,10 @@ const WorkoutTracker = () => {
       {showTMModal && (
         <div className="fixed inset-0 bg-black/80 flex items-center justify-center z-[60] p-4">
           <div className="bg-gray-800 border border-gray-700 rounded-xl p-6 max-w-md w-full">
-            <div className="flex justify-between items-center mb-4">
-              <h2 className="text-lg font-bold text-gray-100 flex items-center gap-2">
-                <Dumbbell className="w-5 h-5 text-purple-400" />
-                {tmModalIsNew ? 'Add Training Max' : 'Edit Training Max'}
-              </h2>
-              <button onClick={() => setShowTMModal(false)} className="text-gray-400 hover:text-gray-200">
-                <X className="w-5 h-5" />
-              </button>
-            </div>
+            <ModalHeader
+              title={<span className="flex items-center gap-2"><Dumbbell className="w-5 h-5 text-purple-400" />{tmModalIsNew ? 'Add Training Max' : 'Edit Training Max'}</span>}
+              onClose={() => setShowTMModal(false)}
+            />
             <div className="mb-4">
               <label className="text-xs text-gray-400 block mb-1">Exercise Name</label>
               {tmModalIsNew ? (
@@ -3958,17 +3957,10 @@ const WorkoutTracker = () => {
       {showAuthModal && (
         <div className="fixed inset-0 bg-black/80 flex items-center justify-center z-50 p-4">
           <div className="bg-gray-800 border border-gray-700 rounded-xl p-6 max-w-sm w-full">
-            <div className="flex justify-between items-center mb-4">
-              <h2 className="text-xl font-bold text-gray-100">
-                {authMode === 'login' ? 'Sign In' : 'Create Account'}
-              </h2>
-              <button
-                onClick={() => { setShowAuthModal(false); setAuthError(''); }}
-                className="text-gray-400 hover:text-gray-200"
-              >
-                <X className="w-5 h-5" />
-              </button>
-            </div>
+            <ModalHeader
+              title={authMode === 'login' ? 'Sign In' : 'Create Account'}
+              onClose={() => { setShowAuthModal(false); setAuthError(''); }}
+            />
             <p className="text-sm text-gray-400 mb-4">
               Sign in to sync your workouts across devices.
             </p>
