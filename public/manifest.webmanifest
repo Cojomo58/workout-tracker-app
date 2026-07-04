@@ -1,0 +1,22 @@
+{
+  "name": "Workout Tracker",
+  "short_name": "Workout",
+  "description": "Track your periodized workouts with progression analytics",
+  "start_url": "/workout-tracker-app/",
+  "scope": "/workout-tracker-app/",
+  "display": "standalone",
+  "background_color": "#111827",
+  "theme_color": "#111827",
+  "icons": [
+    {
+      "src": "/workout-tracker-app/icons/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png"
+    },
+    {
+      "src": "/workout-tracker-app/icons/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png"
+    }
+  ]
+}

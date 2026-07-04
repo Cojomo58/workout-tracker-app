@@ -1,5 +1,5 @@
 import React, { useState, useMemo, useCallback, useRef } from 'react';
-import { Plus, ChevronLeft, ChevronRight, TrendingUp, Calendar, Dumbbell, Save, X, History, Settings, Trash2, Edit3, Trophy, LogIn, LogOut, GripVertical } from 'lucide-react';
+import { Plus, ChevronLeft, ChevronRight, TrendingUp, Calendar, Dumbbell, Save, X, History, Settings, Trash2, Edit3, Trophy, LogIn, LogOut, GripVertical, Timer } from 'lucide-react';
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
 import Fuse from 'fuse.js';
 import { supabase } from './supabaseClient';
@@ -128,6 +128,30 @@ const WorkoutTracker = () => {
   const [exRenameValue, setExRenameValue] = useState('');
   const [exFilter, setExFilter] = useState('');
   const saveTimeoutRef = useRef(null);
+
+  // Rest Timer State (transient — not persisted)
+  const [restDuration, setRestDuration] = useState(90);
+  const [restTimer, setRestTimer] = useState(null); // { exIdx, remaining, running }
+
+  const startRestTimer = (exIdx) => {
+    setRestTimer({ exIdx, remaining: restDuration, running: true });
+  };
+
+  const pauseResumeRestTimer = () => {
+    setRestTimer(prev => (prev ? { ...prev, running: !prev.running } : prev));
+  };
+
+  const stopRestTimer = () => {
+    setRestTimer(null);
+  };
+
+  const adjustRestTimer = (deltaSeconds) => {
+    setRestTimer(prev => (prev ? { ...prev, remaining: Math.max(0, prev.remaining + deltaSeconds) } : prev));
+  };
+
+  const adjustRestDuration = (deltaSeconds) => {
+    setRestDuration(prev => Math.max(15, prev + deltaSeconds));
+  };
 
   // Migrate PRs from historical workout data
   const migrateHistoricalPRs = (logs) => {
@@ -465,6 +489,27 @@ const WorkoutTracker = () => {
   }, [blockMetadata, dataLoaded]);
 
   // Debounced save to Supabase
+  const upsertToSupabase = useCallback(async () => {
+    if (!user || !supabase) return;
+    try {
+      const { error } = await supabase
+        .from('user_data')
+        .upsert({
+          id: user.id,
+          workout_logs: workoutLogs,
+          blocks: blocks,
+          personal_records: personalRecords,
+          current_block: currentBlock,
+          block_metadata: blockMetadata,
+          training_maxes: trainingMaxes
+        });
+
+      if (error) throw error;
+    } catch (error) {
+      console.error('Error saving to Supabase:', error);
+    }
+  }, [user, workoutLogs, blocks, personalRecords, currentBlock, blockMetadata, trainingMaxes]);
+
   const saveToSupabase = useCallback(() => {
     if (!user || !supabase || !dataLoaded) return;
 
@@ -472,31 +517,71 @@ const WorkoutTracker = () => {
       clearTimeout(saveTimeoutRef.current);
     }
 
-    saveTimeoutRef.current = setTimeout(async () => {
-      try {
-        const { error } = await supabase
-          .from('user_data')
-          .upsert({
-            id: user.id,
-            workout_logs: workoutLogs,
-            blocks: blocks,
-            personal_records: personalRecords,
-            current_block: currentBlock,
-            block_metadata: blockMetadata,
-            training_maxes: trainingMaxes
-          });
-
-        if (error) throw error;
-      } catch (error) {
-        console.error('Error saving to Supabase:', error);
-      }
+    saveTimeoutRef.current = setTimeout(() => {
+      saveTimeoutRef.current = null;
+      upsertToSupabase();
     }, 1000);
-  }, [user, workoutLogs, blocks, personalRecords, currentBlock, blockMetadata, trainingMaxes, dataLoaded]);
+  }, [user, dataLoaded, upsertToSupabase]);
 
   // Trigger Supabase sync when data changes
   React.useEffect(() => {
     saveToSupabase();
   }, [saveToSupabase]);
+
+  // Flush any pending cloud save immediately when the tab is hidden/closed,
+  // since the 1s debounce timer can get frozen before it fires on mobile.
+  React.useEffect(() => {
+    const flushPendingSave = () => {
+      if (saveTimeoutRef.current) {
+        clearTimeout(saveTimeoutRef.current);
+        saveTimeoutRef.current = null;
+        upsertToSupabase();
+      }
+    };
+
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'hidden') flushPendingSave();
+    };
+
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    window.addEventListener('pagehide', flushPendingSave);
+
+    return () => {
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+      window.removeEventListener('pagehide', flushPendingSave);
+    };
+  }, [upsertToSupabase]);
+
+  // Rest timer countdown tick
+  React.useEffect(() => {
+    if (!restTimer || !restTimer.running) return;
+
+    const id = setInterval(() => {
+      setRestTimer(prev => {
+        if (!prev || !prev.running) return prev;
+        if (prev.remaining <= 1) {
+          return { ...prev, remaining: 0, running: false };
+        }
+        return { ...prev, remaining: prev.remaining - 1 };
+      });
+    }, 1000);
+
+    return () => clearInterval(id);
+  }, [restTimer?.running, restTimer?.exIdx]);
+
+  // Vibrate once when the rest timer finishes
+  React.useEffect(() => {
+    if (restTimer && restTimer.remaining === 0 && navigator.vibrate) {
+      navigator.vibrate([200, 100, 200]);
+    }
+  }, [restTimer?.remaining]);
+
+  // Clear the rest timer when leaving the logging view
+  React.useEffect(() => {
+    if (view !== 'log') {
+      setRestTimer(null);
+    }
+  }, [view]);
 
   // Cardio Utility Functions
   const parseTimeToSeconds = (timeStr) => {
@@ -3412,6 +3497,76 @@ const WorkoutTracker = () => {
                         <Plus className="w-4 h-4" />
                         Add {(exercise.type || 'strength') === 'cardio' ? 'Entry' : 'Set'}
                       </button>
+                    </div>
+
+                    {/* Rest Timer */}
+                    <div className="mt-3">
+                      {restTimer?.exIdx === exIdx ? (
+                        <div className={`flex items-center justify-between gap-2 flex-wrap p-3 rounded-lg border ${restTimer.remaining === 0 ? 'timer-warning border-red-700/50' : 'bg-gray-750 border-gray-600'}`}>
+                          <div className="flex items-center gap-2">
+                            <span
+                              className={`text-2xl font-mono font-bold tabular-nums ${restTimer.remaining === 0 ? 'text-red-400' : restTimer.remaining <= 10 ? 'text-red-400 animate-timer-pulse' : 'text-emerald-400'}`}
+                            >
+                              {formatSecondsToTime(restTimer.remaining)}
+                            </span>
+                            <span className="text-xs text-gray-400">rest</span>
+                          </div>
+                          <div className="flex items-center gap-2">
+                            <button
+                              onClick={() => adjustRestTimer(-15)}
+                              className="px-2 py-1 bg-gray-700 hover:bg-gray-600 text-gray-300 text-xs rounded-lg"
+                              title="Subtract 15 seconds"
+                            >
+                              -15s
+                            </button>
+                            <button
+                              onClick={() => adjustRestTimer(15)}
+                              className="px-2 py-1 bg-gray-700 hover:bg-gray-600 text-gray-300 text-xs rounded-lg"
+                              title="Add 15 seconds"
+                            >
+                              +15s
+                            </button>
+                            <button
+                              onClick={pauseResumeRestTimer}
+                              className="px-3 py-1 bg-emerald-700 hover:bg-emerald-600 text-white text-xs rounded-lg font-medium"
+                            >
+                              {restTimer.running ? 'Pause' : 'Resume'}
+                            </button>
+                            <button
+                              onClick={stopRestTimer}
+                              className="p-1.5 hover:bg-red-600/20 text-red-400 rounded-lg transition-colors"
+                              title="Stop rest timer"
+                            >
+                              <X className="w-4 h-4" />
+                            </button>
+                          </div>
+                        </div>
+                      ) : (
+                        <div className="flex items-center gap-2">
+                          <button
+                            onClick={() => startRestTimer(exIdx)}
+                            className="flex items-center gap-2 px-3 py-1.5 bg-gray-700 hover:bg-gray-600 text-gray-300 text-sm rounded-lg transition-colors"
+                            title={`Start ${restDuration}s rest timer`}
+                          >
+                            <Timer className="w-4 h-4" />
+                            Start Rest ({restDuration}s)
+                          </button>
+                          <button
+                            onClick={() => adjustRestDuration(-15)}
+                            className="px-2 py-1.5 bg-gray-700 hover:bg-gray-600 text-gray-300 text-xs rounded-lg"
+                            title="Decrease default rest duration"
+                          >
+                            -15s
+                          </button>
+                          <button
+                            onClick={() => adjustRestDuration(15)}
+                            className="px-2 py-1.5 bg-gray-700 hover:bg-gray-600 text-gray-300 text-xs rounded-lg"
+                            title="Increase default rest duration"
+                          >
+                            +15s
+                          </button>
+                        </div>
+                      )}
                     </div>
 
                     {/* Summary Display - Conditional based on type */}
