@@ -46,6 +46,8 @@ const WorkoutTracker = () => {
   const [prefilled, setPrefilled] = useState(false);
   const [draggedExIdx, setDraggedExIdx] = useState(null);
   const [dragOverExIdx, setDragOverExIdx] = useState(null);
+  const [draggedTemplateEx, setDraggedTemplateEx] = useState(null);
+  const [dragOverTemplateEx, setDragOverTemplateEx] = useState(null);
   
   const [blocks, setBlocks] = useState([
     {
@@ -2291,10 +2293,42 @@ const WorkoutTracker = () => {
                             const itemKey = `${dayKey}-${exIdx}`;
                             const isExpanded = expandedTemplateItem === itemKey;
                             return (
-                              <div key={exIdx} className="bg-gray-900/50 rounded-lg border border-gray-600 p-3">
+                              <div
+                                key={exIdx}
+                                draggable
+                                onDragStart={() => setDraggedTemplateEx({ dayKey, exIdx })}
+                                onDragOver={(e) => {
+                                  e.preventDefault();
+                                  if (draggedTemplateEx?.dayKey === dayKey) setDragOverTemplateEx({ dayKey, exIdx });
+                                }}
+                                onDragLeave={() => setDragOverTemplateEx(null)}
+                                onDrop={() => {
+                                  if (!draggedTemplateEx || draggedTemplateEx.dayKey !== dayKey || draggedTemplateEx.exIdx === exIdx) {
+                                    setDraggedTemplateEx(null);
+                                    setDragOverTemplateEx(null);
+                                    return;
+                                  }
+                                  const newBlocks = [...blocks];
+                                  const exList = newBlocks[0].template[dayKey].exercises;
+                                  const [moved] = exList.splice(draggedTemplateEx.exIdx, 1);
+                                  exList.splice(exIdx, 0, moved);
+                                  setBlocks(newBlocks);
+                                  setDraggedTemplateEx(null);
+                                  setDragOverTemplateEx(null);
+                                }}
+                                onDragEnd={() => { setDraggedTemplateEx(null); setDragOverTemplateEx(null); }}
+                                className={`bg-gray-900/50 rounded-lg border p-3 transition-all ${
+                                  draggedTemplateEx?.dayKey === dayKey && draggedTemplateEx.exIdx === exIdx
+                                    ? 'opacity-40 border-gray-500'
+                                    : dragOverTemplateEx?.dayKey === dayKey && dragOverTemplateEx.exIdx === exIdx
+                                    ? 'border-blue-500'
+                                    : 'border-gray-600'
+                                }`}
+                              >
 
                                 {/* Exercise name row + Edit toggle + remove */}
                                 <div className="flex items-center gap-2 mb-2">
+                                  <GripVertical size={16} className="text-gray-500 cursor-grab flex-shrink-0" title="Drag to reorder" />
                                   <input
                                     type="text"
                                     value={exercise.name}
