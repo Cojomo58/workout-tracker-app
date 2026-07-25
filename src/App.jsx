@@ -6,6 +6,61 @@ import { supabase } from './supabaseClient';
 
 const DEFAULT_TM_PERCENT = 90;
 
+// --- Exercise-name normalization & similarity (for duplicate detection) ---
+// Common gym abbreviations expanded so "DB Bench Press" matches "Dumbbell Bench Press".
+const EXERCISE_ABBREV = {
+  db: 'dumbbell', dbs: 'dumbbell', bb: 'barbell', kb: 'kettlebell',
+  ohp: 'overhead press', rdl: 'romanian deadlift', sldl: 'stiff leg deadlift',
+  bp: 'bench press', dl: 'deadlift', sq: 'squat', cg: 'close grip',
+  ez: 'ez bar', bw: 'bodyweight', ext: 'extension', exts: 'extension',
+  incl: 'incline', lat: 'lateral', lats: 'lateral', pulldown: 'pull down',
+  ohd: 'overhead',
+};
+// Words that add no distinguishing meaning when comparing names.
+const EXERCISE_STOP_WORDS = new Set(['the', 'a', 'with', 'and', 'of']);
+
+// Reduce a name to a set of comparable, order-independent tokens.
+const normalizeExerciseTokens = (name) => {
+  const cleaned = String(name || '').toLowerCase().replace(/[^a-z0-9\s]/g, ' ');
+  const tokens = [];
+  cleaned.split(/\s+/).filter(Boolean).forEach((word) => {
+    const expanded = EXERCISE_ABBREV[word] || word;
+    expanded.split(' ').forEach((t) => {
+      if (!t || EXERCISE_STOP_WORDS.has(t)) return;
+      // Crude singularization so "curls" === "curl".
+      const singular = t.length > 3 && t.endsWith('s') ? t.slice(0, -1) : t;
+      tokens.push(singular);
+    });
+  });
+  return tokens;
+};
+
+// Jaccard similarity over normalized token sets. 1 = identical meaning, 0 = nothing shared.
+const exerciseSimilarity = (a, b) => {
+  const sa = new Set(normalizeExerciseTokens(a));
+  const sb = new Set(normalizeExerciseTokens(b));
+  if (sa.size === 0 || sb.size === 0) return 0;
+  let inter = 0;
+  sa.forEach((t) => { if (sb.has(t)) inter++; });
+  return inter / (sa.size + sb.size - inter);
+};
+
+// Best existing name similar to `name` but not spelled identically. Returns { name, score } or null.
+const findSimilarExercise = (name, candidates, threshold = 0.6) => {
+  const target = String(name || '').toLowerCase().trim();
+  if (!target) return null;
+  let best = null;
+  candidates.forEach((candidate) => {
+    if (!candidate) return;
+    if (candidate.toLowerCase().trim() === target) return; // identical spelling — not a "duplicate variation"
+    const score = exerciseSimilarity(name, candidate);
+    if (score >= threshold && (!best || score > best.score)) {
+      best = { name: candidate, score };
+    }
+  });
+  return best;
+};
+
 function ExerciseTypeBadge({ type }) {
   const styles = {
     cardio: 'bg-blue-900/50 text-blue-400',
@@ -109,6 +164,14 @@ const WorkoutTracker = () => {
   const [tmModalCalcReps, setTmModalCalcReps] = useState('');
   const [tmModalTrueRM, setTmModalTrueRM] = useState('');
   const [tmModalPercent, setTmModalPercent] = useState(String(DEFAULT_TM_PERCENT));
+
+  // Training-max suggestions (shown after saving a workout; user confirms before applying)
+  const [tmSuggestions, setTmSuggestions] = useState([]);
+  const [showTMSuggestModal, setShowTMSuggestModal] = useState(false);
+  const [tmSuggestSelected, setTmSuggestSelected] = useState({}); // index -> bool
+
+  // Duplicate-exercise merge tool (Manage Exercises): clusterKey -> chosen keeper name
+  const [mergeKeeper, setMergeKeeper] = useState({});
 
   // Charts State
   const [chartType, setChartType] = useState('weight');
@@ -1393,6 +1456,124 @@ const WorkoutTracker = () => {
     });
   }, [getAllExerciseNames]);
 
+  // Every exercise name known anywhere — logs, training maxes, and the template.
+  // Used as the candidate pool for duplicate detection.
+  const allKnownExerciseNames = useMemo(() => {
+    const seen = new Map(); // lowercase -> display name
+    const add = (n) => {
+      const name = (n || '').trim();
+      if (name && !seen.has(name.toLowerCase())) seen.set(name.toLowerCase(), name);
+    };
+    getAllExerciseNames.forEach(add);
+    Object.keys(trainingMaxes).forEach(add);
+    Object.values(blocks[0]?.template || {}).forEach(day =>
+      (day.exercises || []).forEach(ex => add(ex.name))
+    );
+    return Array.from(seen.values());
+  }, [getAllExerciseNames, trainingMaxes, blocks]);
+
+  // Cluster known names into groups of likely-duplicate variations (e.g. "DB Bench" + "Dumbbell Bench Press").
+  const duplicateClusters = useMemo(() => {
+    const names = allKnownExerciseNames;
+    const parent = names.map((_, i) => i);
+    const find = (i) => { while (parent[i] !== i) { parent[i] = parent[parent[i]]; i = parent[i]; } return i; };
+    const union = (i, j) => { parent[find(i)] = find(j); };
+    for (let i = 0; i < names.length; i++) {
+      for (let j = i + 1; j < names.length; j++) {
+        if (exerciseSimilarity(names[i], names[j]) >= 0.6) union(i, j);
+      }
+    }
+    const groups = new Map();
+    names.forEach((name, i) => {
+      const root = find(i);
+      if (!groups.has(root)) groups.set(root, []);
+      groups.get(root).push(name);
+    });
+    // Only clusters with more than one distinct name are duplicates worth flagging.
+    return Array.from(groups.values()).filter(g => g.length > 1);
+  }, [allKnownExerciseNames]);
+
+  // Build training-max suggestions from the strength exercises just logged.
+  // Never writes state — returns a list the user confirms in a modal.
+  const buildTMSuggestions = (exerciseList) => {
+    const tmKeys = Object.keys(trainingMaxes);
+    const suggestions = [];
+    const usedKeys = new Set();
+    exerciseList.forEach(ex => {
+      if ((ex.type || 'strength') !== 'strength' || !ex.name) return;
+      // Best estimated 1RM across this exercise's sets.
+      let best1RM = 0, bestWeight = 0, bestReps = 0;
+      (ex.sets || []).forEach(set => {
+        const e1rm = calculateEstimated1RM(set.weight, set.reps);
+        if (e1rm > best1RM) { best1RM = e1rm; bestWeight = parseFloat(set.weight); bestReps = parseFloat(set.reps); }
+      });
+      if (!best1RM) return;
+
+      // Resolve which TM this exercise maps to: exact match, else a similar existing TM (avoids duplicate TM entries).
+      let targetKey = tmKeys.find(k => k.toLowerCase().trim() === ex.name.toLowerCase().trim());
+      if (!targetKey) {
+        const similar = findSimilarExercise(ex.name, tmKeys);
+        if (similar) targetKey = similar.name;
+      }
+      const resolvedKey = targetKey || ex.name;
+      if (usedKeys.has(resolvedKey.toLowerCase())) return; // one suggestion per TM per save
+      const existing = targetKey ? trainingMaxes[targetKey] : null;
+      const pct = existing?.trainingMaxPercent || DEFAULT_TM_PERCENT;
+
+      if (!existing) {
+        suggestions.push({ exerciseName: ex.name, targetKey: resolvedKey, isNew: true, currentTrue1RM: null, suggestedTrue1RM: best1RM, pct, weight: bestWeight, reps: bestReps });
+        usedKeys.add(resolvedKey.toLowerCase());
+      } else if (best1RM > existing.true1RM) {
+        suggestions.push({ exerciseName: ex.name, targetKey: resolvedKey, isNew: false, currentTrue1RM: existing.true1RM, suggestedTrue1RM: best1RM, pct, weight: bestWeight, reps: bestReps, matchedByName: targetKey.toLowerCase().trim() !== ex.name.toLowerCase().trim() });
+        usedKeys.add(resolvedKey.toLowerCase());
+      }
+    });
+    return suggestions;
+  };
+
+  // Merge one or more exercises' entire history into another (relabel logs, recompute PRs, fold TMs & template).
+  // fromNames may be a single name or an array; all are folded into toName in one pass.
+  const mergeExercises = (fromNames, toName) => {
+    const sources = new Set((Array.isArray(fromNames) ? fromNames : [fromNames]).filter(n => n && n !== toName));
+    if (!toName || sources.size === 0) return;
+    // Relabel logs.
+    const newLogs = {};
+    Object.entries(workoutLogs).forEach(([key, log]) => {
+      newLogs[key] = {
+        ...log,
+        exercises: (log.exercises || []).map(ex =>
+          sources.has(ex.name) ? { ...ex, name: toName } : ex
+        )
+      };
+    });
+    setWorkoutLogs(newLogs);
+    // Recompute PRs from the merged logs so nothing is lost or double-counted.
+    setPersonalRecords(migrateHistoricalPRs(newLogs));
+    // Fold training maxes — keep the highest true1RM across the whole cluster.
+    setTrainingMaxes(prev => {
+      const updated = { ...prev };
+      let best = updated[toName] || null;
+      sources.forEach(src => {
+        const from = updated[src];
+        if (from && (!best || from.true1RM > best.true1RM)) best = from;
+        delete updated[src];
+      });
+      if (best) updated[toName] = { ...best };
+      return updated;
+    });
+    // Relabel template exercises.
+    setBlocks(prev => {
+      const nb = JSON.parse(JSON.stringify(prev));
+      Object.values(nb[0]?.template || {}).forEach(day =>
+        (day.exercises || []).forEach(ex => {
+          if (sources.has(ex.name)) ex.name = toName;
+          if (sources.has(ex.tmLink)) ex.tmLink = toName;
+        })
+      );
+      return nb;
+    });
+  };
+
   const calculateVolume = (sets) => {
     if (!sets || !Array.isArray(sets)) return 0;
     return sets.reduce((total, set) => {
@@ -1617,6 +1798,57 @@ const WorkoutTracker = () => {
                 <Edit3 className="w-5 h-5 text-gray-400" />
                 Manage Exercises
               </h3>
+
+              {/* Possible duplicates — clusters of similarly-named exercises that can be merged */}
+              {duplicateClusters.length > 0 && (
+                <div className="mb-4 p-3 bg-amber-900/20 border border-amber-700/40 rounded-lg">
+                  <p className="text-xs font-semibold text-amber-300 mb-2">
+                    Possible duplicates ({duplicateClusters.length}) — pick the name to keep, then merge.
+                  </p>
+                  <div className="space-y-3">
+                    {duplicateClusters.map(cluster => {
+                      const clusterKey = [...cluster].sort().join('|');
+                      // Default keeper: a training-max entry if one exists, else the most descriptive (longest) name.
+                      const defaultKeeper = cluster.find(n => trainingMaxes[n])
+                        || [...cluster].sort((a, b) => b.length - a.length)[0];
+                      const keeper = mergeKeeper[clusterKey] || defaultKeeper;
+                      return (
+                        <div key={clusterKey} className="p-2 bg-gray-900/40 rounded-lg">
+                          <div className="flex flex-wrap gap-1.5 mb-2">
+                            {cluster.map(n => (
+                              <button
+                                key={n}
+                                onClick={() => setMergeKeeper(prev => ({ ...prev, [clusterKey]: n }))}
+                                className={`text-xs px-2 py-1 rounded-lg border transition-colors ${
+                                  n === keeper
+                                    ? 'bg-emerald-600/30 border-emerald-500 text-emerald-200'
+                                    : 'bg-gray-700 border-gray-600 text-gray-300 hover:bg-gray-600'
+                                }`}
+                                title={n === keeper ? 'Keeping this name' : 'Click to keep this name'}
+                              >
+                                {n === keeper && '✓ '}{n}
+                              </button>
+                            ))}
+                          </div>
+                          <button
+                            onClick={() => {
+                              const others = cluster.filter(n => n !== keeper);
+                              if (window.confirm(`Merge ${others.map(n => `"${n}"`).join(', ')} into "${keeper}"? History and PRs will be combined under "${keeper}".`)) {
+                                mergeExercises(others, keeper);
+                                setMergeKeeper(prev => { const c = { ...prev }; delete c[clusterKey]; return c; });
+                              }
+                            }}
+                            className="text-xs px-2 py-1 bg-amber-600 hover:bg-amber-500 text-white rounded-lg font-medium"
+                          >
+                            Merge into "{keeper}"
+                          </button>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+
               {getAllExerciseNames.length === 0 ? (
                 <p className="text-gray-400 text-sm">No exercises logged yet.</p>
               ) : (
@@ -3115,6 +3347,35 @@ const WorkoutTracker = () => {
                       </button>
                     </div>
 
+                    {/* Similar-exercise warning — flags likely duplicate variations (e.g. "DB Bench" vs "Dumbbell Bench Press") */}
+                    {(() => {
+                      if (!exercise.name || exercise.name.trim().length < 3) return null;
+                      const candidates = allKnownExerciseNames.filter(
+                        n => n.toLowerCase().trim() !== exercise.name.toLowerCase().trim()
+                      );
+                      const similar = findSimilarExercise(exercise.name, candidates);
+                      if (!similar) return null;
+                      return (
+                        <div className="mb-2 flex items-center gap-2 flex-wrap p-2 bg-amber-900/30 border border-amber-700/50 rounded-lg text-xs">
+                          <span className="text-amber-300">
+                            Similar to existing <span className="font-semibold">"{similar.name}"</span> — same exercise?
+                          </span>
+                          <button
+                            onClick={() => {
+                              const newExercises = [...exercises];
+                              newExercises[exIdx].name = similar.name;
+                              setExercises(newExercises);
+                              setExerciseSuggestions([]);
+                            }}
+                            className="px-2 py-0.5 bg-amber-600 hover:bg-amber-500 text-white rounded font-medium"
+                            title={`Rename this exercise to "${similar.name}"`}
+                          >
+                            Use "{similar.name}"
+                          </button>
+                        </div>
+                      );
+                    })()}
+
                     {/* Exercise Type Toggle */}
                     <div className="flex items-center gap-2 mb-1">
                       <span className="text-xs text-gray-400">Type:</span>
@@ -3812,10 +4073,17 @@ const WorkoutTracker = () => {
                   }
                 });
 
-                // Show PR modal if any PRs were hit
+                // Build training-max suggestions from what was just logged (applied only on user confirm)
+                const suggestions = buildTMSuggestions(exercises);
+                setTmSuggestions(suggestions);
+                setTmSuggestSelected(suggestions.reduce((acc, _, i) => { acc[i] = true; return acc; }, {}));
+
+                // Chain modals: PRs first, then TM suggestions, then back to calendar
                 if (allPRs.length > 0) {
                   setNewPRs(allPRs);
                   setShowPRModal(true);
+                } else if (suggestions.length > 0) {
+                  setShowTMSuggestModal(true);
                 } else {
                   setPrefilled(false);
                   setView('calendar');
@@ -3972,13 +4240,95 @@ const WorkoutTracker = () => {
                 setShowPRModal(false);
                 setNewPRs([]);
                 setPrTMSaved({});
-                setPrefilled(false);
-                setView('calendar');
+                if (tmSuggestions.length > 0) {
+                  setShowTMSuggestModal(true);
+                } else {
+                  setPrefilled(false);
+                  setView('calendar');
+                }
               }}
               className="w-full bg-yellow-500 hover:bg-yellow-600 text-gray-900 font-bold py-3 rounded-lg transition-colors"
             >
               Awesome! Continue
             </button>
+          </div>
+        </div>
+      )}
+
+      {/* Training Max Suggestions Modal — shown after saving; user confirms which TMs to apply */}
+      {showTMSuggestModal && tmSuggestions.length > 0 && (
+        <div className="fixed inset-0 bg-black/80 flex items-center justify-center z-50 p-6">
+          <div className="bg-gray-800 rounded-lg border-2 border-purple-500 p-6 max-w-lg w-full">
+            <div className="text-center mb-5">
+              <Dumbbell className="w-10 h-10 text-purple-400 mx-auto mb-2" />
+              <h2 className="text-2xl font-bold text-purple-300 mb-1">Update Training Maxes?</h2>
+              <p className="text-gray-400 text-sm">
+                Based on today's lifts. Uncheck any you don't want to change.
+              </p>
+            </div>
+
+            <div className="space-y-2 mb-6 max-h-96 overflow-y-auto">
+              {tmSuggestions.map((s, idx) => (
+                <label
+                  key={idx}
+                  className="flex items-start gap-3 p-3 bg-gray-900/50 border border-purple-700/30 rounded-lg cursor-pointer hover:bg-gray-900"
+                >
+                  <input
+                    type="checkbox"
+                    checked={!!tmSuggestSelected[idx]}
+                    onChange={(e) => setTmSuggestSelected(prev => ({ ...prev, [idx]: e.target.checked }))}
+                    className="mt-1 w-4 h-4 accent-purple-500"
+                  />
+                  <div className="flex-1">
+                    <p className="font-medium text-gray-100 text-sm">
+                      {s.targetKey}
+                      {s.isNew
+                        ? <span className="ml-2 text-xs px-1.5 py-0.5 bg-emerald-900/50 text-emerald-400 rounded">New</span>
+                        : <span className="ml-2 text-xs px-1.5 py-0.5 bg-blue-900/50 text-blue-400 rounded">Update</span>}
+                    </p>
+                    <p className="text-xs text-gray-400 mt-0.5">
+                      {s.isNew
+                        ? <>Set 1RM to <span className="text-purple-300 font-medium">{s.suggestedTrue1RM} lb</span> · TM {deriveTrainingMax(s.suggestedTrue1RM, s.pct)} lb ({s.pct}%)</>
+                        : <>1RM <span className="text-gray-500">{s.currentTrue1RM} lb</span> → <span className="text-purple-300 font-medium">{s.suggestedTrue1RM} lb</span> · TM {deriveTrainingMax(s.suggestedTrue1RM, s.pct)} lb ({s.pct}%)</>}
+                    </p>
+                    <p className="text-xs text-gray-500 mt-0.5">
+                      from {s.weight} lb × {s.reps} reps
+                      {s.matchedByName && <span className="text-amber-400"> · logged as "{s.exerciseName}"</span>}
+                    </p>
+                  </div>
+                </label>
+              ))}
+            </div>
+
+            <div className="flex gap-3">
+              <button
+                onClick={() => {
+                  setShowTMSuggestModal(false);
+                  setTmSuggestions([]);
+                  setTmSuggestSelected({});
+                  setPrefilled(false);
+                  setView('calendar');
+                }}
+                className="flex-1 bg-gray-700 hover:bg-gray-600 text-gray-200 font-medium py-3 rounded-lg transition-colors"
+              >
+                Not now
+              </button>
+              <button
+                onClick={() => {
+                  tmSuggestions.forEach((s, idx) => {
+                    if (tmSuggestSelected[idx]) saveTrainingMax(s.targetKey, s.suggestedTrue1RM, s.pct);
+                  });
+                  setShowTMSuggestModal(false);
+                  setTmSuggestions([]);
+                  setTmSuggestSelected({});
+                  setPrefilled(false);
+                  setView('calendar');
+                }}
+                className="flex-1 bg-purple-600 hover:bg-purple-700 text-white font-bold py-3 rounded-lg transition-colors"
+              >
+                Apply Selected
+              </button>
+            </div>
           </div>
         </div>
       )}
