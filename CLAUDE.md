@@ -155,6 +155,13 @@ trainingMaxes = {
 - Live `%TM` display next to weight input while logging — shows `weight ÷ trainingMax × 100`, updates as you type; uses `tmLink` if set, then case-insensitive name fallback
 - `getBest1RM(exerciseName)`: returns `true1RM` from trainingMaxes if set, else estimated1RM from PRs
 - Weekly progression / 5/3/1 scheme removed — simple single `% of TM` per exercise only
+- **Auto-TM suggestions (suggest, don't auto-apply):** on Save Workout, `buildTMSuggestions()` computes the best Epley 1RM per strength exercise and proposes creating a new TM (if none) or raising an existing one (if the new 1RM is higher). Suggestions surface in a purple confirmation modal (after the PR modal, if any) with per-item checkboxes; nothing is written until the user clicks "Apply Selected". A suggestion resolves to an existing TM via exact name match, then `findSimilarExercise()` against TM keys — so logging "DB Bench" updates the "Dumbbell Bench Press" TM instead of creating a duplicate.
+
+## Duplicate Exercise Detection (v2.4)
+- Module-level pure helpers (top of App.jsx): `EXERCISE_ABBREV` (db→dumbbell, bb→barbell, ohp→overhead press, etc.), `normalizeExerciseTokens()` (lowercase, expand abbreviations, strip stop-words, crude singularize), `exerciseSimilarity()` (Jaccard over normalized token sets), `findSimilarExercise(name, candidates, threshold=0.6)`.
+- `allKnownExerciseNames` memo: dedup pool of every name across logs + training maxes + template — the candidate set for detection.
+- **Inline warning while logging:** each exercise card shows an amber "Similar to existing '<name>'" banner when `findSimilarExercise` matches, with a one-click button that renames the in-progress exercise to the canonical name (no history merge — the workout isn't saved yet).
+- **Merge tool in Manage Exercises:** `duplicateClusters` memo (union-find over `allKnownExerciseNames` at similarity ≥ 0.6) lists "Possible duplicates". User picks the keeper (defaults to a TM entry if one exists, else the longest name) and merges; `mergeExercises(fromNames, toName)` relabels logs, recomputes PRs from the merged logs via `migrateHistoricalPRs()`, folds TMs keeping the highest `true1RM`, and relabels template `name`/`tmLink`.
 
 ## Data Flow
 ```
