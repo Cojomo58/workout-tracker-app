@@ -85,6 +85,118 @@ function ModalHeader({ title, onClose }) {
   );
 }
 
+// A blank starting block — every new install (and every reset) begins here, not with any
+// specific person's programming. `template` keys must stay in sync with `days` below.
+const createEmptyBlock = () => ({
+  id: 1,
+  name: 'My Training Block',
+  weeks: 4,
+  template: {
+    monday: { name: '', exercises: [] },
+    tuesday: { name: '', exercises: [] },
+    wednesday: { name: '', exercises: [] },
+    thursday: { name: '', exercises: [] },
+    friday: { name: '', exercises: [] },
+  },
+});
+
+// Generic starter programs offered during first-run onboarding — deliberately not any
+// individual's actual training block, just common, well-known splits.
+const STARTER_TEMPLATES = [
+  {
+    key: 'upper-lower',
+    label: 'Upper / Lower',
+    description: '4 days — upper and lower body alternating',
+    build: () => ({
+      monday: { name: 'Upper Body', exercises: [
+        { name: 'Bench Press', sets: 4, reps: '6-8', technique: '', rest: '2-3 min' },
+        { name: 'Barbell Row', sets: 4, reps: '6-8', technique: '', rest: '2-3 min' },
+        { name: 'Overhead Press', sets: 3, reps: '8-10', technique: '', rest: '2 min' },
+        { name: 'Lat Pulldown', sets: 3, reps: '10-12', technique: '', rest: '90 sec' },
+      ] },
+      tuesday: { name: 'Lower Body', exercises: [
+        { name: 'Squat', sets: 4, reps: '5-8', technique: '', rest: '3 min' },
+        { name: 'Romanian Deadlift', sets: 3, reps: '8-10', technique: '', rest: '2 min' },
+        { name: 'Leg Press', sets: 3, reps: '10-12', technique: '', rest: '2 min' },
+        { name: 'Calf Raise', sets: 3, reps: '12-15', technique: '', rest: '90 sec' },
+      ] },
+      wednesday: { name: '', exercises: [] },
+      thursday: { name: 'Upper Body', exercises: [
+        { name: 'Incline Dumbbell Press', sets: 4, reps: '8-10', technique: '', rest: '2 min' },
+        { name: 'Pull-Up', sets: 4, reps: '6-10', technique: '', rest: '2 min' },
+        { name: 'Dumbbell Shoulder Press', sets: 3, reps: '8-10', technique: '', rest: '90 sec' },
+        { name: 'Cable Row', sets: 3, reps: '10-12', technique: '', rest: '90 sec' },
+      ] },
+      friday: { name: 'Lower Body', exercises: [
+        { name: 'Deadlift', sets: 3, reps: '5', technique: '', rest: '3 min' },
+        { name: 'Front Squat', sets: 3, reps: '6-8', technique: '', rest: '2-3 min' },
+        { name: 'Walking Lunge', sets: 3, reps: '10-12', technique: '', rest: '90 sec' },
+      ] },
+    }),
+  },
+  {
+    key: 'push-pull-legs',
+    label: 'Push / Pull / Legs',
+    description: '5 days — push, pull, and legs across the week',
+    build: () => ({
+      monday: { name: 'Push', exercises: [
+        { name: 'Bench Press', sets: 4, reps: '6-8', technique: '', rest: '2-3 min' },
+        { name: 'Overhead Press', sets: 3, reps: '8-10', technique: '', rest: '2 min' },
+        { name: 'Incline Dumbbell Press', sets: 3, reps: '8-12', technique: '', rest: '90 sec' },
+        { name: 'Triceps Pushdown', sets: 3, reps: '10-15', technique: '', rest: '60 sec' },
+      ] },
+      tuesday: { name: 'Pull', exercises: [
+        { name: 'Deadlift', sets: 3, reps: '5', technique: '', rest: '3 min' },
+        { name: 'Pull-Up', sets: 4, reps: '6-10', technique: '', rest: '2 min' },
+        { name: 'Barbell Row', sets: 3, reps: '8-10', technique: '', rest: '2 min' },
+        { name: 'Barbell Curl', sets: 3, reps: '10-12', technique: '', rest: '60 sec' },
+      ] },
+      wednesday: { name: 'Legs', exercises: [
+        { name: 'Squat', sets: 4, reps: '5-8', technique: '', rest: '3 min' },
+        { name: 'Romanian Deadlift', sets: 3, reps: '8-10', technique: '', rest: '2 min' },
+        { name: 'Leg Press', sets: 3, reps: '10-12', technique: '', rest: '2 min' },
+        { name: 'Calf Raise', sets: 3, reps: '12-15', technique: '', rest: '60 sec' },
+      ] },
+      thursday: { name: 'Push', exercises: [
+        { name: 'Overhead Press', sets: 4, reps: '6-8', technique: '', rest: '2-3 min' },
+        { name: 'Incline Bench Press', sets: 3, reps: '8-10', technique: '', rest: '2 min' },
+        { name: 'Lateral Raise', sets: 3, reps: '12-15', technique: '', rest: '60 sec' },
+        { name: 'Dips', sets: 3, reps: '8-12', technique: '', rest: '90 sec' },
+      ] },
+      friday: { name: 'Pull', exercises: [
+        { name: 'Barbell Row', sets: 4, reps: '6-8', technique: '', rest: '2-3 min' },
+        { name: 'Lat Pulldown', sets: 3, reps: '10-12', technique: '', rest: '90 sec' },
+        { name: 'Face Pull', sets: 3, reps: '12-15', technique: '', rest: '60 sec' },
+        { name: 'Dumbbell Curl', sets: 3, reps: '10-12', technique: '', rest: '60 sec' },
+      ] },
+    }),
+  },
+  {
+    key: 'full-body',
+    label: 'Full Body',
+    description: '3 days — whole body each session, one rest day between',
+    build: () => ({
+      monday: { name: 'Full Body A', exercises: [
+        { name: 'Squat', sets: 3, reps: '6-8', technique: '', rest: '2-3 min' },
+        { name: 'Bench Press', sets: 3, reps: '6-8', technique: '', rest: '2-3 min' },
+        { name: 'Barbell Row', sets: 3, reps: '8-10', technique: '', rest: '90 sec' },
+      ] },
+      tuesday: { name: '', exercises: [] },
+      wednesday: { name: 'Full Body B', exercises: [
+        { name: 'Deadlift', sets: 3, reps: '5', technique: '', rest: '3 min' },
+        { name: 'Overhead Press', sets: 3, reps: '6-8', technique: '', rest: '2 min' },
+        { name: 'Lat Pulldown', sets: 3, reps: '10-12', technique: '', rest: '90 sec' },
+      ] },
+      thursday: { name: '', exercises: [] },
+      friday: { name: 'Full Body C', exercises: [
+        { name: 'Front Squat', sets: 3, reps: '6-8', technique: '', rest: '2-3 min' },
+        { name: 'Incline Dumbbell Press', sets: 3, reps: '8-10', technique: '', rest: '90 sec' },
+        { name: 'Pull-Up', sets: 3, reps: '6-10', technique: '', rest: '2 min' },
+      ] },
+    }),
+  },
+];
+
 // Compact numeric input with +/- steppers — used for every set field on the logging screen so
 // mobile users get large tap targets instead of a bare text box.
 function NumberField({ value, onChange, step = 1, placeholder = '', ariaLabel, min = 0 }) {
@@ -162,49 +274,11 @@ const WorkoutTracker = () => {
   const [draggedTemplateEx, setDraggedTemplateEx] = useState(null);
   const [dragOverTemplateEx, setDragOverTemplateEx] = useState(null);
   
-  const [blocks, setBlocks] = useState([
-    {
-      id: 1,
-      name: 'Block A - Hypertrophy Focus',
-      weeks: 4,
-      template: {
-        monday: {
-          name: 'Upper Body (Push Focus)',
-          exercises: [
-            { name: 'Incline Bench Press', sets: 3, reps: '6-10', technique: 'Failure, 1 sec pause', rest: '2-3 min' },
-            { name: 'Seated DB Shoulder Press', sets: 2, reps: '8-12', technique: 'Failure', rest: '2-3 min' }
-          ]
-        },
-        tuesday: {
-          name: 'Conditioning (HIIT)',
-          exercises: [
-            { name: 'Bike Tabata', sets: 3, reps: '8 rounds', technique: '20s sprint/10s rest', rest: 'N/A' }
-          ]
-        },
-        wednesday: {
-          name: 'Lower Body',
-          exercises: [
-            { name: 'Belt Squat', sets: 3, reps: '8-12', technique: 'Failure', rest: '2-3 min' }
-          ]
-        },
-        thursday: {
-          name: 'Conditioning (Methodical)',
-          exercises: [
-            { name: 'Bike Tabata', sets: 3, reps: '8 rounds', technique: '20s sprint/10s rest', rest: 'N/A' }
-          ]
-        },
-        friday: {
-          name: 'Upper Body (Pull Focus)',
-          exercises: [
-            { name: 'Pull-Up', sets: 3, reps: '6-10', technique: 'Failure, 2s eccentric', rest: '2-3 min' }
-          ]
-        }
-      }
-    }
-  ]);
+  const [blocks, setBlocks] = useState([createEmptyBlock()]);
 
   const [workoutLogs, setWorkoutLogs] = useState({});
   const [dataLoaded, setDataLoaded] = useState(false);
+  const [showOnboarding, setShowOnboarding] = useState(false);
 
 
   // Personal Records State
@@ -504,10 +578,24 @@ const WorkoutTracker = () => {
     }
   };
 
+  // Does this browser already have a workout template or logs cached locally?
+  // Used to decide whether to show first-run onboarding — never fires for a returning user.
+  const hasStoredData = () => {
+    try {
+      const logs = localStorage.getItem('workout-logs');
+      if (logs && Object.keys(JSON.parse(logs)).length > 0) return true;
+      if (localStorage.getItem('workout-blocks')) return true;
+      return false;
+    } catch {
+      return false;
+    }
+  };
+
   // Load data on mount or when user changes
   React.useEffect(() => {
     const loadData = async () => {
       setDataLoaded(false);
+      let hadData = hasStoredData();
 
       if (user && supabase) {
         try {
@@ -528,6 +616,7 @@ const WorkoutTracker = () => {
             const hasCloudData = data.workout_logs && Object.keys(data.workout_logs).length > 0;
             if (hasCloudData) {
               loadFromCloud(data);
+              hadData = true;
             } else {
               loadFromLocalStorage();
             }
@@ -543,6 +632,12 @@ const WorkoutTracker = () => {
       }
 
       setDataLoaded(true);
+
+      // First-run onboarding: only for a browser/account with no template and no logs at all,
+      // and only once ever (the flag survives so re-opening the app never re-triggers it).
+      if (!hadData && !localStorage.getItem('onboarding-complete')) {
+        setShowOnboarding(true);
+      }
     };
 
     if (!authLoading) {
@@ -1308,10 +1403,10 @@ const WorkoutTracker = () => {
     }
   };
 
-  const importData = (event) => {
+  const importData = (event, onSuccess) => {
     const file = event.target.files[0];
     if (!file) return;
-    
+
     const reader = new FileReader();
     reader.onload = (e) => {
       try {
@@ -1337,6 +1432,7 @@ const WorkoutTracker = () => {
           setPersonalRecords(migratedPRs);
         }
         alert('Data imported successfully!');
+        if (onSuccess) onSuccess();
       } catch (error) {
         alert('Error importing data: ' + error.message);
       }
@@ -2594,6 +2690,11 @@ const WorkoutTracker = () => {
 
                         {/* Exercise list */}
                         <div className="space-y-2">
+                          {dayData.exercises.length === 0 && (
+                            <p className="text-sm text-gray-500 italic py-2">
+                              No exercises yet — add your first exercise below.
+                            </p>
+                          )}
                           {dayData.exercises.map((exercise, exIdx) => {
                             const itemKey = `${dayKey}-${exIdx}`;
                             const isExpanded = expandedTemplateItem === itemKey;
@@ -2893,16 +2994,7 @@ const WorkoutTracker = () => {
                 onClick={() => {
                   if (window.confirm('Reset template to default? This will clear all your custom workout days and exercises.')) {
                     const newBlocks = [...blocks];
-                    newBlocks[0] = {
-                      id: 1,
-                      name: 'Block A - Hypertrophy Focus',
-                      weeks: 4,
-                      template: {
-                        monday: { name: 'Upper Body (Push Focus)', exercises: [] },
-                        wednesday: { name: 'Lower Body', exercises: [] },
-                        friday: { name: 'Upper Body (Pull Focus)', exercises: [] }
-                      }
-                    };
+                    newBlocks[0] = createEmptyBlock();
                     setBlocks(newBlocks);
                   }
                 }}
@@ -2913,17 +3005,7 @@ const WorkoutTracker = () => {
               <button
                 onClick={() => {
                   if (window.confirm('Full reset? This will clear all workout logs, your template, and training maxes — but keep your personal records (PRs). This cannot be undone.')) {
-                    const defaultTemplate = {
-                      id: 1,
-                      name: 'Block A - Hypertrophy Focus',
-                      weeks: 4,
-                      template: {
-                        monday: { name: 'Upper Body (Push Focus)', exercises: [] },
-                        wednesday: { name: 'Lower Body', exercises: [] },
-                        friday: { name: 'Upper Body (Pull Focus)', exercises: [] }
-                      }
-                    };
-                    setBlocks([defaultTemplate]);
+                    setBlocks([createEmptyBlock()]);
                     setWorkoutLogs({});
                     setTrainingMaxes({});
                     setCurrentBlock(1);
@@ -3135,8 +3217,22 @@ const WorkoutTracker = () => {
                           )}
 
                         </div>
-                        <p className="text-sm text-gray-400">{workout?.name}</p>
-                        <p className="text-xs text-gray-500 mt-1">{workout?.exercises.length} exercises</p>
+                        <p className="text-sm text-gray-400">
+                          {workout?.name || <span className="italic text-gray-500">No workout planned</span>}
+                        </p>
+                        <p className="text-xs text-gray-500 mt-1">
+                          {workout?.exercises?.length > 0 ? (
+                            `${workout.exercises.length} exercise${workout.exercises.length !== 1 ? 's' : ''}`
+                          ) : (
+                            <button
+                              onClick={(e) => { e.stopPropagation(); setView('template'); }}
+                              className="text-emerald-400 hover:underline"
+                              title="Add exercises to this day in the Template tab"
+                            >
+                              Set up in Template &rarr;
+                            </button>
+                          )}
+                        </p>
                       </div>
                       {log && (
                         <Dumbbell className="w-5 h-5 text-emerald-400" />
@@ -3155,7 +3251,7 @@ const WorkoutTracker = () => {
             <div className="flex items-center justify-between">
               <div>
                 <h2 className="text-2xl font-bold text-gray-100">
-                  {getCurrentTemplate()[selectedDay]?.name}
+                  {getCurrentTemplate()[selectedDay]?.name || 'Workout'}
                 </h2>
                 <p className="text-gray-400">
                   Week {currentWeek} - {selectedDay.charAt(0).toUpperCase() + selectedDay.slice(1)}
@@ -4683,6 +4779,75 @@ const WorkoutTracker = () => {
                     className="text-blue-400 hover:underline">Sign in</button>
                 </>
               )}
+            </p>
+          </div>
+        </div>
+      )}
+
+      {/* First-Run Onboarding Modal */}
+      {showOnboarding && (
+        <div className="fixed inset-0 bg-black/80 flex items-center justify-center z-50 p-4">
+          <div className="bg-gray-800 border border-gray-700 rounded-xl p-6 max-w-lg w-full max-h-[90vh] overflow-y-auto">
+            <ModalHeader
+              title={<span className="flex items-center gap-2"><Dumbbell className="w-5 h-5 text-emerald-400" />Welcome to Workout Tracker</span>}
+              onClose={() => {
+                setShowOnboarding(false);
+                localStorage.setItem('onboarding-complete', 'true');
+              }}
+            />
+            <p className="text-sm text-gray-400 mb-5">
+              Let's set up your training template. You can always change this later in the Template tab.
+            </p>
+
+            <div className="space-y-3 mb-4">
+              {STARTER_TEMPLATES.map(preset => (
+                <button
+                  key={preset.key}
+                  onClick={() => {
+                    setBlocks([{ id: 1, name: preset.label, weeks: 4, template: preset.build() }]);
+                    setShowOnboarding(false);
+                    localStorage.setItem('onboarding-complete', 'true');
+                  }}
+                  className="w-full text-left p-4 bg-gray-900/50 hover:bg-gray-700 border border-gray-700 rounded-lg transition-colors"
+                >
+                  <p className="font-medium text-gray-100">{preset.label}</p>
+                  <p className="text-xs text-gray-400 mt-1">{preset.description}</p>
+                </button>
+              ))}
+
+              <button
+                onClick={() => {
+                  setShowOnboarding(false);
+                  localStorage.setItem('onboarding-complete', 'true');
+                  setView('template');
+                }}
+                className="w-full text-left p-4 bg-gray-900/50 hover:bg-gray-700 border border-gray-700 rounded-lg transition-colors"
+              >
+                <p className="font-medium text-gray-100">Build my own</p>
+                <p className="text-xs text-gray-400 mt-1">Start blank and add your own days and exercises</p>
+              </button>
+
+              <label className="flex items-center justify-between p-4 bg-gray-900/50 hover:bg-gray-700 border border-gray-700 rounded-lg transition-colors cursor-pointer">
+                <div>
+                  <p className="font-medium text-gray-100">Import a backup</p>
+                  <p className="text-xs text-gray-400 mt-1">Restore from a previously exported JSON file</p>
+                </div>
+                <input
+                  type="file"
+                  accept=".json"
+                  className="hidden"
+                  onChange={(e) => {
+                    importData(e, () => {
+                      setShowOnboarding(false);
+                      localStorage.setItem('onboarding-complete', 'true');
+                    });
+                  }}
+                />
+              </label>
+            </div>
+
+            <p className="text-xs text-gray-500 text-center">
+              You can skip this and set things up later from the Template tab.
             </p>
           </div>
         </div>

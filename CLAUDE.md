@@ -17,7 +17,7 @@ React-based workout tracking application for logging strength training, cardio, 
 ```
 workout-tracker-app/
 ├── src/
-│   ├── App.jsx            # Main component (monolithic) — includes ExerciseTypeBadge + ModalHeader above WorkoutTracker
+│   ├── App.jsx            # Main component (monolithic) — includes ExerciseTypeBadge, ModalHeader, createEmptyBlock, STARTER_TEMPLATES above WorkoutTracker
 │   ├── supabaseClient.js  # Supabase client singleton
 │   ├── main.jsx           # React entry point
 │   └── index.css          # @import "tailwindcss" + @theme block (custom colors/animations)
@@ -156,6 +156,13 @@ trainingMaxes = {
 - `getBest1RM(exerciseName)`: returns `true1RM` from trainingMaxes if set, else estimated1RM from PRs
 - Weekly progression / 5/3/1 scheme removed — simple single `% of TM` per exercise only
 - **Auto-TM suggestions (suggest, don't auto-apply):** on Save Workout, `buildTMSuggestions()` computes the best Epley 1RM per strength exercise and proposes creating a new TM (if none) or raising an existing one (if the new 1RM is higher). Suggestions surface in a purple confirmation modal (after the PR modal, if any) with per-item checkboxes; nothing is written until the user clicks "Apply Selected". A suggestion resolves to an existing TM via exact name match, then `findSimilarExercise()` against TM keys — so logging "DB Bench" updates the "Dumbbell Bench Press" TM instead of creating a duplicate.
+
+## First-Run Onboarding (v2.5)
+- The default template is blank: `createEmptyBlock()` (module-level, defined above `WorkoutTracker`) returns a single block with all 5 weekdays present but empty (`name: '', exercises: []`). This is the initial `blocks` state, and what "Reset to Default Template" / "Full Reset" restore — nothing in the app ships with any individual's personal workout data baked in.
+- **First-run detection:** `hasStoredData()` checks whether `workout-logs`/`workout-blocks` already exist in localStorage; combined with a cloud check (`workout_logs` non-empty) inside the load effect, this produces `hadData`. If `!hadData && !localStorage.getItem('onboarding-complete')`, `showOnboarding` is set true. This only fires for a browser/account that has truly never had any data — existing users (local or cloud) never see it, regardless of the `onboarding-complete` flag.
+- **Onboarding modal** (rendered near the other modals, gated on `showOnboarding`) offers: 3 generic `STARTER_TEMPLATES` presets (Upper/Lower, Push/Pull/Legs, Full Body — module-level constants, each a `build()` function returning a full `template` object), "Build my own" (closes the modal and jumps to the Template view with the empty template), and "Import a backup" (wires the previously-unused `importData()` to a file input; `importData` now takes an optional `onSuccess` callback so the modal only closes after a successful parse).
+- Dismissing the modal any way (X, picking an option) sets the `onboarding-complete` localStorage flag so it never reappears for that browser.
+- Empty-state UI: Calendar day cards show "No workout planned" + a "Set up in Template →" link when a day has no exercises; the Template editor shows "No exercises yet — add your first exercise below." per empty day; the log view header falls back to "Workout" when the day has no name.
 
 ## Duplicate Exercise Detection (v2.4)
 - Module-level pure helpers (top of App.jsx): `EXERCISE_ABBREV` (db→dumbbell, bb→barbell, ohp→overhead press, etc.), `normalizeExerciseTokens()` (lowercase, expand abbreviations, strip stop-words, crude singularize), `exerciseSimilarity()` (Jaccard over normalized token sets), `findSimilarExercise(name, candidates, threshold=0.6)`.
