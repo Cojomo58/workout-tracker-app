@@ -1,5 +1,5 @@
 import React, { useState, useMemo, useCallback, useRef } from 'react';
-import { Plus, ChevronLeft, ChevronRight, TrendingUp, Calendar, Dumbbell, Save, X, History, Settings, Trash2, Edit3, Trophy, LogIn, LogOut, GripVertical, Timer } from 'lucide-react';
+import { Plus, Minus, ChevronLeft, ChevronRight, ChevronDown, ArrowUp, ArrowDown, TrendingUp, Calendar, Dumbbell, Save, X, History, Settings, Trash2, Edit3, Trophy, LogIn, LogOut, GripVertical, Timer } from 'lucide-react';
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
 import Fuse from 'fuse.js';
 import { supabase } from './supabaseClient';
@@ -197,6 +197,62 @@ const STARTER_TEMPLATES = [
   },
 ];
 
+// Compact numeric input with +/- steppers — used for every set field on the logging screen so
+// mobile users get large tap targets instead of a bare text box.
+function NumberField({ value, onChange, step = 1, placeholder = '', ariaLabel, min = 0 }) {
+  const val = value === undefined || value === null ? '' : value;
+  const bump = (delta) => {
+    const base = parseFloat(val);
+    const start = Number.isFinite(base) ? base : (parseFloat(placeholder) || 0);
+    let next = start + delta;
+    if (min !== null && next < min) next = min;
+    const rounded = Math.round(next * 100) / 100;
+    onChange(String(rounded));
+  };
+  return (
+    <div className="flex items-center bg-gray-700 border border-gray-600 rounded-lg overflow-hidden h-11 w-full min-w-0">
+      <button
+        type="button"
+        onClick={() => bump(-step)}
+        className="w-7 h-11 flex items-center justify-center text-gray-300 hover:bg-gray-600 active:bg-gray-500 shrink-0"
+        aria-label={`Decrease ${ariaLabel || ''}`}
+        tabIndex={-1}
+      >
+        <Minus className="w-3.5 h-3.5" />
+      </button>
+      <input
+        type="text"
+        inputMode="decimal"
+        value={val}
+        placeholder={placeholder}
+        onChange={(e) => onChange(e.target.value)}
+        aria-label={ariaLabel}
+        className="flex-1 min-w-0 text-center text-base bg-transparent text-gray-100 h-11 px-0.5 focus:outline-none"
+      />
+      <button
+        type="button"
+        onClick={() => bump(step)}
+        className="w-7 h-11 flex items-center justify-center text-gray-300 hover:bg-gray-600 active:bg-gray-500 shrink-0"
+        aria-label={`Increase ${ariaLabel || ''}`}
+        tabIndex={-1}
+      >
+        <Plus className="w-3.5 h-3.5" />
+      </button>
+    </div>
+  );
+}
+
+// Count sets that have at least their primary field filled in, for the collapsed-card "2/3" readout.
+const countFilledSets = (sets, type) => {
+  if (!sets || sets.length === 0) return 0;
+  return sets.filter(s => {
+    if (type === 'cardio') return (s.distance && String(s.distance).trim()) && (s.time && String(s.time).trim());
+    if (type === 'tabata') return s.rounds && String(s.rounds).trim();
+    if (type === 'bodyweight') return s.reps && String(s.reps).trim();
+    return s.weight && String(s.weight).trim() && s.reps && String(s.reps).trim();
+  }).length;
+};
+
 const WorkoutTracker = () => {
   const [view, setView] = useState('calendar');
   const [currentBlock, setCurrentBlock] = useState(1);
@@ -211,6 +267,8 @@ const WorkoutTracker = () => {
 
   const [exercises, setExercises] = useState([]);
   const [prefilled, setPrefilled] = useState(false);
+  // Accordion: which exercise card is open on the mobile-first logging screen (null = all collapsed)
+  const [expandedExIdx, setExpandedExIdx] = useState(0);
   const [draggedExIdx, setDraggedExIdx] = useState(null);
   const [dragOverExIdx, setDragOverExIdx] = useState(null);
   const [draggedTemplateEx, setDraggedTemplateEx] = useState(null);
@@ -742,6 +800,11 @@ const WorkoutTracker = () => {
       setRestTimer(null);
     }
   }, [view]);
+
+  // Accordion defaults to the first exercise expanded whenever a new day's log is opened
+  React.useEffect(() => {
+    if (view === 'log') setExpandedExIdx(0);
+  }, [view, selectedDay]);
 
   // Cardio Utility Functions
   const parseTimeToSeconds = (timeStr) => {
@@ -1730,8 +1793,18 @@ const WorkoutTracker = () => {
     return 'decreased';
   };
 
+  // Touch-friendly reorder (drag-and-drop doesn't work on touch) — swaps exercise at idx with its neighbor.
+  const moveExercise = (idx, direction) => {
+    const targetIdx = idx + direction;
+    if (targetIdx < 0 || targetIdx >= exercises.length) return;
+    const newExercises = [...exercises];
+    [newExercises[idx], newExercises[targetIdx]] = [newExercises[targetIdx], newExercises[idx]];
+    setExercises(newExercises);
+    setExpandedExIdx(prev => (prev === idx ? targetIdx : prev === targetIdx ? idx : prev));
+  };
+
   return (
-    <div className="max-w-4xl mx-auto p-4 md:p-6 bg-gray-900 min-h-screen">
+    <div className="max-w-4xl mx-auto p-4 md:p-6 bg-gray-900 min-h-screen overflow-x-hidden">
       <div className="mb-6">
         <h1 className="text-2xl md:text-3xl font-bold text-gray-100 mb-2">Workout Tracker</h1>
         <div className="flex items-center justify-between">
@@ -3308,10 +3381,14 @@ const WorkoutTracker = () => {
                   ? ((currentVolume - previousVolume) / previousVolume * 100).toFixed(1)
                   : null;
 
+                const isExpanded = expandedExIdx === exIdx;
+                const exType = exercise.type || 'strength';
+                const filledCount = countFilledSets(exercise.sets, exType);
+
                 return (
                   <div
                     key={exIdx}
-                    className={`bg-gray-800 p-4 rounded-lg border transition-all ${
+                    className={`bg-gray-800 rounded-lg border transition-all overflow-hidden ${
                       draggedExIdx === exIdx
                         ? 'opacity-40 border-gray-500'
                         : dragOverExIdx === exIdx
@@ -3337,9 +3414,49 @@ const WorkoutTracker = () => {
                     }}
                     onDragEnd={() => { setDraggedExIdx(null); setDragOverExIdx(null); }}
                   >
-                    <div className="mb-3 flex items-center gap-2">
-                      <GripVertical size={16} className="text-gray-500 cursor-grab flex-shrink-0" title="Drag to reorder" />
-                      <div className="relative flex-1">
+                    {/* Collapsed header row — always visible. Tap the name area to expand/collapse. */}
+                    <div className="flex items-center gap-1.5 p-3">
+                      <GripVertical size={16} className="hidden md:block text-gray-500 cursor-grab flex-shrink-0" title="Drag to reorder" />
+                      <div className="flex flex-col shrink-0 md:hidden">
+                        <button
+                          type="button"
+                          onClick={() => moveExercise(exIdx, -1)}
+                          disabled={exIdx === 0}
+                          className="p-0.5 text-gray-500 hover:text-gray-200 disabled:opacity-20 disabled:pointer-events-none"
+                          title="Move up"
+                        >
+                          <ArrowUp className="w-3.5 h-3.5" />
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => moveExercise(exIdx, 1)}
+                          disabled={exIdx === exercises.length - 1}
+                          className="p-0.5 text-gray-500 hover:text-gray-200 disabled:opacity-20 disabled:pointer-events-none"
+                          title="Move down"
+                        >
+                          <ArrowDown className="w-3.5 h-3.5" />
+                        </button>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => setExpandedExIdx(isExpanded ? null : exIdx)}
+                        className="flex-1 min-w-0 flex items-center gap-2 text-left"
+                      >
+                        <span className="font-semibold text-gray-100 truncate">{exercise.name || 'New Exercise'}</span>
+                        <ExerciseTypeBadge type={exType} />
+                        {exercise.templateTarget && (
+                          <span className="text-xs text-gray-500 shrink-0 hidden sm:inline">{exercise.templateTarget}</span>
+                        )}
+                        {exercise.sets.length > 0 && (
+                          <span className="text-xs text-gray-500 shrink-0 ml-auto">{filledCount}/{exercise.sets.length}</span>
+                        )}
+                        <ChevronDown className={`w-4 h-4 text-gray-500 shrink-0 transition-transform ${isExpanded ? 'rotate-180' : ''}`} />
+                      </button>
+                    </div>
+
+                    {isExpanded && (
+                    <div className="px-3 pb-3 pt-1 border-t border-gray-700/70">
+                    <div className="relative mb-2 mt-2">
                         <input
                           type="text"
                           value={exercise.name}
@@ -3381,7 +3498,7 @@ const WorkoutTracker = () => {
                           onBlur={() => {
                             setTimeout(() => setExerciseSuggestions([]), 150);
                           }}
-                          className="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded-lg font-semibold text-gray-100"
+                          className="w-full min-w-0 px-3 py-2 bg-gray-700 border border-gray-600 rounded-lg font-semibold text-gray-100"
                         />
 
                         {/* Autocomplete dropdown */}
@@ -3406,7 +3523,9 @@ const WorkoutTracker = () => {
                             ))}
                           </div>
                         )}
-                      </div>
+                    </div>
+
+                    <div className="flex items-center gap-2 flex-wrap mb-2">
                       <button
                         onClick={() => {
                           if (previousSession && previousSession.sets) {
@@ -3434,6 +3553,12 @@ const WorkoutTracker = () => {
                           if (window.confirm(`Remove ${exercise.name}?`)) {
                             const newExercises = exercises.filter((_, idx) => idx !== exIdx);
                             setExercises(newExercises);
+                            setExpandedExIdx(prev => {
+                              if (prev === null) return prev;
+                              if (prev === exIdx) return newExercises.length > 0 ? Math.min(exIdx, newExercises.length - 1) : null;
+                              if (prev > exIdx) return prev - 1;
+                              return prev;
+                            });
                           }
                         }}
                         className="p-2 bg-red-600/20 hover:bg-red-600/30 text-red-400 rounded-lg transition-colors"
@@ -3473,8 +3598,8 @@ const WorkoutTracker = () => {
                     })()}
 
                     {/* Exercise Type Toggle */}
-                    <div className="flex items-center gap-2 mb-1">
-                      <span className="text-xs text-gray-400">Type:</span>
+                    <div className="flex items-center gap-1.5 flex-wrap mb-1">
+                      <span className="text-xs text-gray-400 hidden sm:inline">Type:</span>
                       {[
                         { key: 'strength', label: 'Strength', activeClass: 'bg-emerald-600 text-white', title: 'Track weight and reps' },
                         { key: 'cardio', label: 'Cardio', activeClass: 'bg-blue-600 text-white', title: 'Track distance and time' },
@@ -3506,7 +3631,7 @@ const WorkoutTracker = () => {
                                 setExercises(newExercises);
                               }
                             }}
-                            className={`px-3 py-1 rounded-lg text-xs font-medium transition-colors ${isActive ? activeClass : 'bg-gray-600 text-gray-300 hover:bg-gray-500'}`}
+                            className={`px-2.5 py-1.5 rounded-lg text-xs font-medium transition-colors ${isActive ? activeClass : 'bg-gray-600 text-gray-300 hover:bg-gray-500'}`}
                             title={title}
                           >
                             {label}
@@ -3515,7 +3640,7 @@ const WorkoutTracker = () => {
                       })}
                     </div>
                     {exercise.pendingTypeChange && (
-                      <div className="mb-3 mt-2 p-2 bg-orange-950/40 border border-orange-700/50 rounded-lg flex items-center justify-between gap-3">
+                      <div className="mb-3 mt-2 p-2 bg-orange-950/40 border border-orange-700/50 rounded-lg flex items-center justify-between gap-3 flex-wrap">
                         <span className="text-xs text-orange-300">Switching type will clear {exercise.sets.length} set{exercise.sets.length !== 1 ? 's' : ''}. Continue?</span>
                         <div className="flex gap-2 shrink-0">
                           <button
@@ -3580,7 +3705,14 @@ const WorkoutTracker = () => {
                       </div>
                     )}
 
-
+                    {(exType === 'strength' || exType === 'bodyweight') && (
+                      <div className="grid grid-cols-[2.25rem_1fr_1fr_2rem] gap-2 px-0.5 mb-1">
+                        <span />
+                        <span className="text-[10px] uppercase tracking-wide text-gray-500">{exType === 'bodyweight' ? 'Reps' : 'Weight'}</span>
+                        <span className="text-[10px] uppercase tracking-wide text-gray-500">{exType === 'bodyweight' ? 'Hold (s)' : 'Reps'}</span>
+                        <span />
+                      </div>
+                    )}
                     <div className="space-y-2">
                       {exercise.sets.map((set, setIdx) => {
                         const exerciseType = exercise.type || 'strength';
@@ -3589,63 +3721,65 @@ const WorkoutTracker = () => {
                         if (exerciseType === 'cardio') {
                           // Cardio input fields
                           return (
-                            <div key={setIdx} className="flex gap-2 items-center flex-wrap">
-                              <span className="text-sm font-medium text-gray-400 w-16">Entry {setIdx + 1}</span>
-                              <input
-                                type="text"
-                                inputMode="decimal"
-                                placeholder="Distance"
-                                value={set.distance || ''}
-                                onChange={(e) => {
-                                  const newExercises = [...exercises];
-                                  newExercises[exIdx].sets[setIdx].distance = e.target.value;
-                                  setExercises(newExercises);
-                                }}
-                                className="px-3 py-2 bg-gray-700 border border-gray-600 rounded-lg w-20 text-gray-100"
-                              />
-                              <select
-                                value={set.unit || 'miles'}
-                                onChange={(e) => {
-                                  const newExercises = [...exercises];
-                                  newExercises[exIdx].sets[setIdx].unit = e.target.value;
-                                  setExercises(newExercises);
-                                }}
-                                className="px-2 py-2 bg-gray-700 border border-gray-600 rounded-lg text-gray-100 text-sm"
-                              >
-                                <option value="miles">mi</option>
-                                <option value="km">km</option>
-                                <option value="meters">m</option>
-                              </select>
-                              <span className="text-gray-400">in</span>
-                              <input
-                                type="text"
-                                placeholder="MM:SS"
-                                value={set.time || ''}
-                                onChange={(e) => {
-                                  const newExercises = [...exercises];
-                                  newExercises[exIdx].sets[setIdx].time = e.target.value;
-                                  setExercises(newExercises);
-                                }}
-                                className="px-3 py-2 bg-gray-700 border border-gray-600 rounded-lg w-24 text-gray-100"
-                              />
-                              {/* Show calculated pace */}
-                              {set.distance && set.time && (
-                                <span className="text-xs text-cyan-400 bg-cyan-950/30 px-2 py-1 rounded">
-                                  {calculatePace(parseTimeToSeconds(set.time), parseFloat(set.distance))}/{set.unit === 'km' ? 'km' : 'mi'}
-                                </span>
-                              )}
-                              {exercise.sets.length > 1 && (
-                                <button
-                                  onClick={() => {
+                            <div key={setIdx} className="space-y-1">
+                              <div className="grid grid-cols-[2.25rem_1fr_3.25rem_5rem_2rem] gap-2 items-center">
+                                <span className="w-9 h-9 rounded-full bg-gray-700 text-gray-300 text-sm font-medium flex items-center justify-center justify-self-center">{setIdx + 1}</span>
+                                <NumberField
+                                  value={set.distance || ''}
+                                  onChange={(v) => {
                                     const newExercises = [...exercises];
-                                    newExercises[exIdx].sets = newExercises[exIdx].sets.filter((_, idx) => idx !== setIdx);
+                                    newExercises[exIdx].sets[setIdx].distance = v;
                                     setExercises(newExercises);
                                   }}
-                                  className="p-1 hover:bg-red-600/20 text-red-400 rounded transition-colors"
-                                  title="Remove entry"
+                                  step={0.1}
+                                  placeholder="Dist"
+                                  ariaLabel={`Entry ${setIdx + 1} distance`}
+                                />
+                                <select
+                                  value={set.unit || 'miles'}
+                                  onChange={(e) => {
+                                    const newExercises = [...exercises];
+                                    newExercises[exIdx].sets[setIdx].unit = e.target.value;
+                                    setExercises(newExercises);
+                                  }}
+                                  className="h-11 px-1 bg-gray-700 border border-gray-600 rounded-lg text-gray-100 text-sm min-w-0"
                                 >
-                                  <X className="w-3 h-3" />
-                                </button>
+                                  <option value="miles">mi</option>
+                                  <option value="km">km</option>
+                                  <option value="meters">m</option>
+                                </select>
+                                <input
+                                  type="text"
+                                  placeholder="MM:SS"
+                                  value={set.time || ''}
+                                  onChange={(e) => {
+                                    const newExercises = [...exercises];
+                                    newExercises[exIdx].sets[setIdx].time = e.target.value;
+                                    setExercises(newExercises);
+                                  }}
+                                  className="h-11 px-2 min-w-0 bg-gray-700 border border-gray-600 rounded-lg text-gray-100 text-center"
+                                />
+                                {exercise.sets.length > 1 ? (
+                                  <button
+                                    onClick={() => {
+                                      const newExercises = [...exercises];
+                                      newExercises[exIdx].sets = newExercises[exIdx].sets.filter((_, idx) => idx !== setIdx);
+                                      setExercises(newExercises);
+                                    }}
+                                    className="p-1 hover:bg-red-600/20 text-red-400 rounded transition-colors justify-self-center"
+                                    title="Remove entry"
+                                  >
+                                    <X className="w-3.5 h-3.5" />
+                                  </button>
+                                ) : <span />}
+                              </div>
+                              {/* Show calculated pace */}
+                              {set.distance && set.time && (
+                                <div className="pl-11">
+                                  <span className="text-xs text-cyan-400 bg-cyan-950/30 px-2 py-1 rounded">
+                                    {calculatePace(parseTimeToSeconds(set.time), parseFloat(set.distance))}/{set.unit === 'km' ? 'km' : 'mi'}
+                                  </span>
+                                </div>
                               )}
                             </div>
                           );
@@ -3653,201 +3787,198 @@ const WorkoutTracker = () => {
 
                         if (exerciseType === 'bodyweight') {
                           return (
-                            <div key={setIdx} className="flex gap-2 items-center flex-wrap">
-                              <span className="text-sm font-medium text-gray-400 w-12">Set {setIdx + 1}</span>
-                              <input
-                                type="text"
-                                inputMode="decimal"
-                                placeholder="Reps"
+                            <div key={setIdx} className="grid grid-cols-[2.25rem_1fr_1fr_2rem] gap-2 items-center">
+                              <span className="w-9 h-9 rounded-full bg-gray-700 text-gray-300 text-sm font-medium flex items-center justify-center justify-self-center">{setIdx + 1}</span>
+                              <NumberField
                                 value={set.reps || ''}
-                                onChange={(e) => {
+                                onChange={(v) => {
                                   const newExercises = [...exercises];
-                                  newExercises[exIdx].sets[setIdx].reps = e.target.value;
+                                  newExercises[exIdx].sets[setIdx].reps = v;
                                   setExercises(newExercises);
                                 }}
-                                className="px-3 py-2 bg-gray-700 border border-gray-600 rounded-lg w-20 text-gray-100"
-                                title="Number of reps"
+                                step={1}
+                                placeholder="Reps"
+                                ariaLabel={`Set ${setIdx + 1} reps`}
                               />
-                              <span className="text-gray-400">reps</span>
-                              <input
-                                type="text"
-                                inputMode="decimal"
-                                placeholder="Seconds"
+                              <NumberField
                                 value={set.holdTime || ''}
-                                onChange={(e) => {
+                                onChange={(v) => {
                                   const newExercises = [...exercises];
-                                  newExercises[exIdx].sets[setIdx].holdTime = e.target.value;
+                                  newExercises[exIdx].sets[setIdx].holdTime = v;
                                   setExercises(newExercises);
                                 }}
-                                className="px-3 py-2 bg-gray-700 border border-gray-600 rounded-lg w-20 text-gray-100"
-                                title="Hold time in seconds"
+                                step={5}
+                                placeholder="Hold"
+                                ariaLabel={`Set ${setIdx + 1} hold time in seconds`}
                               />
-                              <span className="text-gray-400">s hold</span>
-                              {exercise.sets.length > 1 && (
+                              {exercise.sets.length > 1 ? (
                                 <button
                                   onClick={() => {
                                     const newExercises = [...exercises];
                                     newExercises[exIdx].sets = newExercises[exIdx].sets.filter((_, idx) => idx !== setIdx);
                                     setExercises(newExercises);
                                   }}
-                                  className="p-1 hover:bg-red-600/20 text-red-400 rounded transition-colors"
+                                  className="p-1 hover:bg-red-600/20 text-red-400 rounded transition-colors justify-self-center"
                                   title="Remove set"
                                 >
-                                  <X className="w-3 h-3" />
+                                  <X className="w-3.5 h-3.5" />
                                 </button>
-                              )}
+                              ) : <span />}
                             </div>
                           );
                         }
 
                         if (exerciseType === 'tabata') {
                           // Tabata input fields
+                          const totalSeconds = set.rounds
+                            ? (parseInt(set.rounds) * (parseInt(set.workSeconds || 20) + parseInt(set.restSeconds || 10)) - parseInt(set.restSeconds || 10))
+                            : null;
                           return (
-                            <div key={setIdx} className="flex gap-2 items-center flex-wrap">
-                              <span className="text-sm font-medium text-gray-400 w-12">Set {setIdx + 1}</span>
-                              <input
-                                type="text"
-                                inputMode="decimal"
-                                placeholder="Rounds"
-                                value={set.rounds || ''}
-                                onChange={(e) => {
-                                  const newExercises = [...exercises];
-                                  newExercises[exIdx].sets[setIdx].rounds = e.target.value;
-                                  setExercises(newExercises);
-                                }}
-                                className="px-3 py-2 bg-gray-700 border border-gray-600 rounded-lg w-20 text-gray-100"
-                                title="Number of rounds completed"
-                              />
-                              <span className="text-gray-400">rounds @</span>
-                              <input
-                                type="text"
-                                inputMode="decimal"
-                                placeholder="20"
-                                value={set.workSeconds || '20'}
-                                onChange={(e) => {
-                                  const newExercises = [...exercises];
-                                  newExercises[exIdx].sets[setIdx].workSeconds = e.target.value;
-                                  setExercises(newExercises);
-                                }}
-                                className="px-2 py-2 bg-gray-700 border border-gray-600 rounded-lg w-14 text-gray-100 text-center"
-                                title="Work interval in seconds"
-                              />
-                              <span className="text-gray-400">s /</span>
-                              <input
-                                type="text"
-                                inputMode="decimal"
-                                placeholder="10"
-                                value={set.restSeconds || '10'}
-                                onChange={(e) => {
-                                  const newExercises = [...exercises];
-                                  newExercises[exIdx].sets[setIdx].restSeconds = e.target.value;
-                                  setExercises(newExercises);
-                                }}
-                                className="px-2 py-2 bg-gray-700 border border-gray-600 rounded-lg w-14 text-gray-100 text-center"
-                                title="Rest interval in seconds"
-                              />
-                              <span className="text-gray-400">s</span>
-                              <input
-                                type="text"
-                                inputMode="decimal"
-                                placeholder="Cal"
-                                value={set.calories || ''}
-                                onChange={(e) => {
-                                  const newExercises = [...exercises];
-                                  newExercises[exIdx].sets[setIdx].calories = e.target.value;
-                                  setExercises(newExercises);
-                                }}
-                                className="px-2 py-2 bg-gray-700 border border-gray-600 rounded-lg w-16 text-gray-100 text-center"
-                                title="Calories burned (from machine display)"
-                              />
-                              <span className="text-gray-400">kcal</span>
-                              {/* Show total time */}
-                              {set.rounds && (
-                                <span className="text-xs text-orange-400 bg-orange-950/30 px-2 py-1 rounded" title="Total workout time">
-                                  {Math.floor((parseInt(set.rounds) * (parseInt(set.workSeconds || 20) + parseInt(set.restSeconds || 10)) - parseInt(set.restSeconds || 10)) / 60)}:{((parseInt(set.rounds) * (parseInt(set.workSeconds || 20) + parseInt(set.restSeconds || 10)) - parseInt(set.restSeconds || 10)) % 60).toString().padStart(2, '0')} total
-                                </span>
-                              )}
-                              {exercise.sets.length > 1 && (
-                                <button
-                                  onClick={() => {
+                            <div key={setIdx} className="space-y-1.5 p-2 rounded-lg bg-gray-750/50 border border-gray-700">
+                              <div className="grid grid-cols-[2.25rem_1fr_2rem] gap-2 items-center">
+                                <span className="w-9 h-9 rounded-full bg-gray-700 text-gray-300 text-sm font-medium flex items-center justify-center justify-self-center">{setIdx + 1}</span>
+                                <NumberField
+                                  value={set.rounds || ''}
+                                  onChange={(v) => {
                                     const newExercises = [...exercises];
-                                    newExercises[exIdx].sets = newExercises[exIdx].sets.filter((_, idx) => idx !== setIdx);
+                                    newExercises[exIdx].sets[setIdx].rounds = v;
                                     setExercises(newExercises);
                                   }}
-                                  className="p-1 hover:bg-red-600/20 text-red-400 rounded transition-colors"
-                                  title="Remove set"
-                                >
-                                  <X className="w-3 h-3" />
-                                </button>
+                                  step={1}
+                                  placeholder="Rounds"
+                                  ariaLabel={`Set ${setIdx + 1} rounds`}
+                                />
+                                {exercise.sets.length > 1 ? (
+                                  <button
+                                    onClick={() => {
+                                      const newExercises = [...exercises];
+                                      newExercises[exIdx].sets = newExercises[exIdx].sets.filter((_, idx) => idx !== setIdx);
+                                      setExercises(newExercises);
+                                    }}
+                                    className="p-1 hover:bg-red-600/20 text-red-400 rounded transition-colors justify-self-center"
+                                    title="Remove set"
+                                  >
+                                    <X className="w-3.5 h-3.5" />
+                                  </button>
+                                ) : <span />}
+                              </div>
+                              <div className="grid grid-cols-3 gap-2 pl-11">
+                                <NumberField
+                                  value={set.workSeconds || '20'}
+                                  onChange={(v) => {
+                                    const newExercises = [...exercises];
+                                    newExercises[exIdx].sets[setIdx].workSeconds = v;
+                                    setExercises(newExercises);
+                                  }}
+                                  step={5}
+                                  placeholder="Work(s)"
+                                  ariaLabel={`Set ${setIdx + 1} work seconds`}
+                                />
+                                <NumberField
+                                  value={set.restSeconds || '10'}
+                                  onChange={(v) => {
+                                    const newExercises = [...exercises];
+                                    newExercises[exIdx].sets[setIdx].restSeconds = v;
+                                    setExercises(newExercises);
+                                  }}
+                                  step={5}
+                                  placeholder="Rest(s)"
+                                  ariaLabel={`Set ${setIdx + 1} rest seconds`}
+                                />
+                                <NumberField
+                                  value={set.calories || ''}
+                                  onChange={(v) => {
+                                    const newExercises = [...exercises];
+                                    newExercises[exIdx].sets[setIdx].calories = v;
+                                    setExercises(newExercises);
+                                  }}
+                                  step={10}
+                                  placeholder="Cal"
+                                  ariaLabel={`Set ${setIdx + 1} calories`}
+                                />
+                              </div>
+                              {totalSeconds != null && (
+                                <div className="pl-11">
+                                  <span className="text-xs text-orange-400 bg-orange-950/30 px-2 py-1 rounded" title="Total workout time">
+                                    {Math.floor(totalSeconds / 60)}:{(totalSeconds % 60).toString().padStart(2, '0')} total
+                                  </span>
+                                </div>
                               )}
                             </div>
                           );
                         }
 
                         // Strength input fields
+                        const lookupKey = exercise.tmLink || exercise.name;
+                        const nameLower = lookupKey?.toLowerCase().trim();
+                        const tmData = trainingMaxes[lookupKey] ||
+                          Object.entries(trainingMaxes).find(([k]) => k.toLowerCase().trim() === nameLower)?.[1];
+                        const tmBase = tmData?.trainingMax;
+                        const wNum = parseFloat(set.weight);
+                        const pctOfTM = (tmBase && wNum) ? (wNum / tmBase * 100).toFixed(1).replace(/\.0$/, '') : null;
+                        const hasSubline = pctOfTM || comparison === 'improved' || comparison === 'matched';
+
                         return (
-                          <div key={setIdx} className="flex gap-2 items-center flex-wrap">
-                            <span className="text-sm font-medium text-gray-400 w-12">Set {setIdx + 1}</span>
-                            <input
-                              type="text"
-                              inputMode="decimal"
-                              placeholder="Weight"
-                              value={set.weight || ''}
-                              onChange={(e) => {
-                                const newExercises = [...exercises];
-                                newExercises[exIdx].sets[setIdx].weight = e.target.value;
-                                newExercises[exIdx].sets[setIdx].weightSource = 'manual';
-                                delete newExercises[exIdx].sets[setIdx].tmPct;
-                                setExercises(newExercises);
-                              }}
-                              className="px-3 py-2 bg-gray-700 border border-gray-600 rounded-lg w-24 text-gray-100"
-                            />
-                            {(() => {
-                              const lookupKey = exercise.tmLink || exercise.name;
-                              const nameLower = lookupKey?.toLowerCase().trim();
-                              const tmData = trainingMaxes[lookupKey] ||
-                                Object.entries(trainingMaxes).find(([k]) => k.toLowerCase().trim() === nameLower)?.[1];
-                              const base = tmData?.trainingMax;
-                              const w = parseFloat(set.weight);
-                              if (!base || !w) return null;
-                              const pct = (w / base * 100).toFixed(1).replace(/\.0$/, '');
-                              return (
-                                <span className="text-xs text-purple-300" title={`${pct}% of TM (${base} lb)`}>
-                                  {pct}%TM
-                                </span>
-                              );
-                            })()}
-                            <span className="text-gray-400">lb ×</span>
-                            <input
-                              type="text"
-                              inputMode="decimal"
-                              placeholder="Reps"
-                              value={set.reps || ''}
-                              onChange={(e) => {
-                                const newExercises = [...exercises];
-                                newExercises[exIdx].sets[setIdx].reps = e.target.value;
-                                setExercises(newExercises);
-                              }}
-                              className="px-3 py-2 bg-gray-700 border border-gray-600 rounded-lg w-20 text-gray-100"
-                            />
-                            {comparison === 'improved' && (
-                              <span className="text-emerald-400 text-sm" title="Improvement over previous session">↑</span>
-                            )}
-                            {comparison === 'matched' && (
-                              <span className="text-blue-400 text-sm" title="Matched previous session">✓</span>
-                            )}
-                            {exercise.sets.length > 1 && (
-                              <button
-                                onClick={() => {
+                          <div key={setIdx} className="space-y-0.5">
+                            <div className="grid grid-cols-[2.25rem_1fr_1fr_2rem] gap-2 items-center">
+                              <span className="w-9 h-9 rounded-full bg-gray-700 text-gray-300 text-sm font-medium flex items-center justify-center justify-self-center">{setIdx + 1}</span>
+                              <NumberField
+                                value={set.weight || ''}
+                                onChange={(v) => {
                                   const newExercises = [...exercises];
-                                  newExercises[exIdx].sets = newExercises[exIdx].sets.filter((_, idx) => idx !== setIdx);
+                                  newExercises[exIdx].sets[setIdx].weight = v;
+                                  newExercises[exIdx].sets[setIdx].weightSource = 'manual';
+                                  delete newExercises[exIdx].sets[setIdx].tmPct;
                                   setExercises(newExercises);
                                 }}
-                                className="p-1 hover:bg-red-600/20 text-red-400 rounded transition-colors"
-                                title="Remove set"
-                              >
-                                <X className="w-3 h-3" />
-                              </button>
+                                step={5}
+                                placeholder="Weight"
+                                ariaLabel={`Set ${setIdx + 1} weight`}
+                              />
+                              <NumberField
+                                value={set.reps || ''}
+                                onChange={(v) => {
+                                  const newExercises = [...exercises];
+                                  newExercises[exIdx].sets[setIdx].reps = v;
+                                  setExercises(newExercises);
+                                }}
+                                step={1}
+                                placeholder="Reps"
+                                ariaLabel={`Set ${setIdx + 1} reps`}
+                              />
+                              {exercise.sets.length > 1 ? (
+                                <button
+                                  onClick={() => {
+                                    const newExercises = [...exercises];
+                                    newExercises[exIdx].sets = newExercises[exIdx].sets.filter((_, idx) => idx !== setIdx);
+                                    setExercises(newExercises);
+                                  }}
+                                  className="p-1 hover:bg-red-600/20 text-red-400 rounded transition-colors justify-self-center"
+                                  title="Remove set"
+                                >
+                                  <X className="w-3.5 h-3.5" />
+                                </button>
+                              ) : <span />}
+                            </div>
+                            {hasSubline && (
+                              <div className="grid grid-cols-[2.25rem_1fr_1fr_2rem] gap-2">
+                                <span />
+                                <div className="flex items-center gap-2 text-xs">
+                                  {pctOfTM && (
+                                    <span className="text-purple-300" title={`${pctOfTM}% of TM (${tmBase} lb)`}>
+                                      {pctOfTM}%TM
+                                    </span>
+                                  )}
+                                  {comparison === 'improved' && (
+                                    <span className="text-emerald-400" title="Improvement over previous session">↑ improved</span>
+                                  )}
+                                  {comparison === 'matched' && (
+                                    <span className="text-blue-400" title="Matched previous session">✓ matched</span>
+                                  )}
+                                </div>
+                                <span />
+                                <span />
+                              </div>
                             )}
                           </div>
                         );
@@ -3883,7 +4014,7 @@ const WorkoutTracker = () => {
                           }
                           setExercises(newExercises);
                         }}
-                        className="w-full py-2 px-3 bg-gray-700 hover:bg-gray-600 text-gray-300 text-sm rounded-lg transition-colors flex items-center justify-center gap-2"
+                        className="w-full py-2.5 px-3 bg-gray-700 hover:bg-gray-600 text-gray-300 text-sm rounded-lg transition-colors flex items-center justify-center gap-2"
                       >
                         <Plus className="w-4 h-4" />
                         Add {(exercise.type || 'strength') === 'cardio' ? 'Entry' : 'Set'}
@@ -3902,7 +4033,7 @@ const WorkoutTracker = () => {
                             </span>
                             <span className="text-xs text-gray-400">rest</span>
                           </div>
-                          <div className="flex items-center gap-2">
+                          <div className="flex items-center gap-2 flex-wrap">
                             <button
                               onClick={() => adjustRestTimer(-15)}
                               className="px-2 py-1 bg-gray-700 hover:bg-gray-600 text-gray-300 text-xs rounded-lg"
@@ -3933,7 +4064,7 @@ const WorkoutTracker = () => {
                           </div>
                         </div>
                       ) : (
-                        <div className="flex items-center gap-2">
+                        <div className="flex items-center gap-2 flex-wrap">
                           <button
                             onClick={() => startRestTimer(exIdx)}
                             className="flex items-center gap-2 px-3 py-1.5 bg-gray-700 hover:bg-gray-600 text-gray-300 text-sm rounded-lg transition-colors"
@@ -4119,18 +4250,22 @@ const WorkoutTracker = () => {
                         + Add note
                       </button>
                     )}
+                    </div>
+                    )}
                   </div>
                 );
               })}
 
               <button
                 onClick={() => {
-                  setExercises([...exercises, {
+                  const newExercises = [...exercises, {
                     name: 'New Exercise',
                     technique: '',
                     sets: [{ weight: '', reps: '' }, { weight: '', reps: '' }, { weight: '', reps: '' }],
                     notes: ''
-                  }]);
+                  }];
+                  setExercises(newExercises);
+                  setExpandedExIdx(newExercises.length - 1);
                 }}
                 className="w-full py-3 px-4 bg-gray-700 hover:bg-gray-600 text-gray-200 rounded-lg font-medium flex items-center justify-center gap-2"
               >
@@ -4139,6 +4274,9 @@ const WorkoutTracker = () => {
               </button>
             </div>
 
+            {/* Sticky action bar — keeps Save reachable without hunting past a long exercise list.
+                Left slot is reserved for the draft-saved / set-progress status added in later PRs. */}
+            <div className="sticky bottom-0 -mx-4 md:-mx-6 px-4 md:px-6 py-3 bg-gray-900/95 backdrop-blur border-t border-gray-700 flex items-center gap-3" style={{ paddingBottom: 'calc(0.75rem + env(safe-area-inset-bottom))' }}>
             <button
               onClick={() => {
                 const logKey = `block${currentBlock}-week${currentWeek}-${selectedDay}`;
@@ -4185,11 +4323,12 @@ const WorkoutTracker = () => {
                   setView('calendar');
                 }
               }}
-              className="w-full bg-emerald-600 text-white py-3 rounded-lg font-medium hover:bg-emerald-700 flex items-center justify-center gap-2"
+              className="flex-1 bg-emerald-600 text-white py-3 rounded-lg font-medium hover:bg-emerald-700 flex items-center justify-center gap-2"
             >
               <Save className="w-5 h-5" />
               Save Workout
             </button>
+            </div>
           </div>
         )}
       </div>

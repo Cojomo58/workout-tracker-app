@@ -191,6 +191,13 @@ Logged in:   React State ←→ localStorage (cache) + Supabase (cloud, debounce
 - `inputMode="decimal"` on all numeric inputs for mobile keypad
 - Notes field is collapsible in log view (shows `+ Add note` when empty)
 
+## Logging Screen (mobile-first, v2.5)
+- Exercise cards in the log view are an **accordion** (`expandedExIdx` state, single index, `null` = all collapsed). Opening a new day's log defaults to expanding the first exercise. Adding an exercise expands it; removing one re-targets `expandedExIdx` to stay valid.
+- Collapsed card = one row: reorder arrows (mobile only, `moveExercise(idx, direction)` swaps neighbors since HTML5 drag doesn't work on touch) / `GripVertical` drag handle (desktop only, `md:` breakpoint), name, `ExerciseTypeBadge`, template target, `filled/total` set count (`countFilledSets()`), chevron. Tap the row to expand/collapse.
+- Set rows are a CSS grid (`grid-cols-[2.25rem_1fr_1fr_2rem]` for strength/bodyweight; wider variants for cardio/tabata), not `flex flex-wrap` — this is what keeps one set to one row on a 375px screen.
+- `NumberField` (module-level component, alongside `ExerciseTypeBadge`/`ModalHeader`) is the `− [input] +` stepper used for every numeric set field; the `%TM` badge and the improved/matched comparison arrow moved out of the input row into a sub-line beneath it.
+- The Save Workout button lives in a `sticky bottom-0` footer bar at the bottom of the log view; the bar has room reserved for draft-save status and set-progress text added by later work.
+
 ## Storage
 
 ### localStorage Keys (always used as cache)
