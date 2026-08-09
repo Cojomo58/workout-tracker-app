@@ -1,6 +1,6 @@
 import React, { useState, useMemo, useCallback, useRef } from 'react';
 import { Plus, Minus, ChevronLeft, ChevronRight, ChevronDown, ArrowUp, ArrowDown, TrendingUp, Calendar, Dumbbell, Save, X, History, Settings, Trash2, Edit3, Trophy, LogIn, LogOut, GripVertical, Timer } from 'lucide-react';
-import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
+import { LineChart, Line, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
 import Fuse from 'fuse.js';
 import { supabase } from './supabaseClient';
 
@@ -306,7 +306,10 @@ const WorkoutTracker = () => {
   const [mergeKeeper, setMergeKeeper] = useState({});
 
   // Charts State
-  const [chartType, setChartType] = useState('weight');
+  const [chartType, setChartType] = useState('e1rm');
+  const [tmSectionOpen, setTmSectionOpen] = useState(false);
+  const [tmFilter, setTmFilter] = useState('');
+  const [manageExOpen, setManageExOpen] = useState(false);
 
   // Autocomplete State
   const [exerciseSuggestions, setExerciseSuggestions] = useState([]);
@@ -1349,7 +1352,10 @@ const WorkoutTracker = () => {
           }
         } else {
           // Strength chart types
-          if (type === 'weight') {
+          if (type === 'e1rm') {
+            // Best estimated 1RM (Epley) across the session's sets
+            value = Math.max(...entry.sets.map(s => calculateEstimated1RM(s.weight, s.reps)));
+          } else if (type === 'weight') {
             // Max weight in the session
             value = Math.max(...entry.sets.map(s => parseFloat(s.weight) || 0));
           } else if (type === 'volume') {
@@ -1605,6 +1611,27 @@ const WorkoutTracker = () => {
     return Array.from(nameMap.values()).map(v => v.name);
   }, [workoutLogs]);
 
+  // The 6 most-frequently-logged exercises — the quick-select chips above the Progress trend chart
+  const topExerciseNames = useMemo(() => {
+    const nameMap = new Map();
+    Object.values(workoutLogs).forEach(log => {
+      if (log.exercises) {
+        log.exercises.forEach(ex => {
+          if (ex.name) {
+            const key = ex.name.toLowerCase().trim();
+            const existing = nameMap.get(key);
+            if (existing) existing.count++;
+            else nameMap.set(key, { name: ex.name.trim(), count: 1 });
+          }
+        });
+      }
+    });
+    return Array.from(nameMap.values())
+      .sort((a, b) => b.count - a.count)
+      .slice(0, 6)
+      .map(v => v.name);
+  }, [workoutLogs]);
+
   // Fuse instance for fuzzy search
   const fuse = useMemo(() => {
     return new Fuse(getAllExerciseNames, {
@@ -1740,6 +1767,35 @@ const WorkoutTracker = () => {
       const reps = parseFloat(set.reps) || 0;
       return total + (weight * reps);
     }, 0);
+  };
+
+  // Total strength volume logged across a block — the "am I progressing" stat tile + block chart
+  const getTotalVolumeForBlock = (blockNum) => {
+    return Object.entries(workoutLogs)
+      .filter(([k]) => k.startsWith(`block${blockNum}-`))
+      .reduce((sum, [, log]) => sum + (log.exercises || []).reduce(
+        (s, ex) => s + (((ex.type || 'strength') === 'strength') ? calculateVolume(ex.sets) : 0), 0
+      ), 0);
+  };
+
+  const getSessionsInLastNDays = (days) => {
+    const cutoff = Date.now() - days * 24 * 60 * 60 * 1000;
+    return Object.values(workoutLogs).filter(log => log.date && new Date(log.date).getTime() >= cutoff).length;
+  };
+
+  // Total strength volume per week within a block, for the block volume bar chart
+  const getBlockWeeklyVolume = (blockNum) => {
+    const weekTotals = {};
+    Object.entries(workoutLogs).forEach(([key, log]) => {
+      const m = key.match(new RegExp(`^block${blockNum}-week(\\d+)-`));
+      if (!m || !log.exercises) return;
+      const week = parseInt(m[1]);
+      const vol = log.exercises.reduce((s, ex) => s + (((ex.type || 'strength') === 'strength') ? calculateVolume(ex.sets) : 0), 0);
+      weekTotals[week] = (weekTotals[week] || 0) + vol;
+    });
+    return Object.entries(weekTotals)
+      .map(([week, volume]) => ({ week: `Wk ${week}`, weekNum: parseInt(week), volume: Math.round(volume) }))
+      .sort((a, b) => a.weekNum - b.weekNum);
   };
 
   const getLastPopulatedWeek = (blockNum, logs) => {
@@ -1883,7 +1939,7 @@ const WorkoutTracker = () => {
             <div className="bg-gray-800 p-4 md:p-6 rounded-lg border border-gray-700">
               <div className="grid grid-cols-2 md:grid-cols-4 gap-3 md:gap-4">
                 <div className="p-4 bg-emerald-950/30 border border-emerald-900/50 rounded-lg">
-                  <p className="text-sm text-gray-400">Workouts Completed</p>
+                  <p className="text-sm text-gray-400">Workouts (Block)</p>
                   <p className="text-2xl md:text-3xl font-bold text-emerald-400">
                     {Object.keys(workoutLogs).filter(k => k.startsWith(`block${currentBlock}`)).length}
                   </p>
@@ -1892,210 +1948,55 @@ const WorkoutTracker = () => {
                   <p className="text-sm text-gray-400">Current Week</p>
                   <p className="text-2xl md:text-3xl font-bold text-blue-400">{currentWeek}</p>
                 </div>
-              </div>
-            </div>
-
-
-            {/* Training Maxes Panel */}
-            <div className="bg-gray-800 p-4 rounded-lg border border-gray-700">
-              <div className="flex items-center justify-between mb-3">
-                <h3 className="font-semibold text-gray-100 flex items-center gap-2">
-                  <Dumbbell className="w-5 h-5 text-purple-400" />
-                  Training Maxes
-                </h3>
-                <button
-                  onClick={() => {
-                    setTmModalExercise('');
-                    setTmModalIsNew(true);
-                    setTmModalTrueRM('');
-                    setTmModalPercent(String(DEFAULT_TM_PERCENT));
-                    setTmModalCalcWeight('');
-                    setTmModalCalcReps('');
-                    setShowTMModal(true);
-                  }}
-                  className="text-xs px-3 py-1 bg-purple-700/40 hover:bg-purple-700/60 text-purple-300 rounded-lg border border-purple-700/50 flex items-center gap-1"
-                >
-                  <Plus className="w-3 h-3" /> Add
-                </button>
-              </div>
-              {Object.keys(trainingMaxes).length === 0 ? (
-                <p className="text-gray-400 text-sm">No training maxes set. Select an exercise with an Est. 1RM and click "Set as Training Max".</p>
-              ) : (
-                <div className="space-y-2">
-                  {Object.entries(trainingMaxes).map(([name, tm]) => (
-                    <div key={name} className="flex items-center justify-between p-3 bg-gray-900/50 rounded-lg border border-gray-700">
-                      <div>
-                        <p className="font-medium text-gray-100 text-sm">{name}</p>
-                        <p className="text-xs text-gray-400 mt-0.5">
-                          1RM: {tm.true1RM} lb · {tm.trainingMaxPercent}% →{' '}
-                          <span className="text-purple-300 font-medium">TM: {tm.trainingMax} lb</span>
-                        </p>
-                        <p className="text-xs text-gray-500">Updated {tm.lastUpdated}</p>
-                        {tm.history && tm.history.length > 0 && (
-                          <p className="text-xs text-gray-500 mt-1">
-                            Started: <span className="text-gray-400">{tm.history[0].trainingMax} lb</span>
-                            <span className="text-gray-600"> ({tm.history[0].date})</span>
-                            {' → '}
-                            <span className="text-purple-300 font-medium">{tm.trainingMax} lb now</span>
-                          </p>
-                        )}
-                      </div>
-                      <button
-                        onClick={() => {
-                          setTmModalExercise(name);
-                          setTmModalIsNew(false);
-                          setTmModalTrueRM(String(tm.true1RM));
-                          setTmModalPercent(String(tm.trainingMaxPercent));
-                          setTmModalCalcWeight('');
-                          setTmModalCalcReps('');
-                          setShowTMModal(true);
-                        }}
-                        className="p-2 bg-gray-700 hover:bg-gray-600 text-gray-300 rounded-lg transition-colors"
-                        title="Edit training max"
-                      >
-                        <Edit3 className="w-4 h-4" />
-                      </button>
-                    </div>
-                  ))}
-                </div>
-              )}
-            </div>
-
-            {/* Manage Exercises */}
-            <div className="bg-gray-800 p-4 rounded-lg border border-gray-700">
-              <h3 className="font-semibold text-gray-100 mb-3 flex items-center gap-2">
-                <Edit3 className="w-5 h-5 text-gray-400" />
-                Manage Exercises
-              </h3>
-
-              {/* Possible duplicates — clusters of similarly-named exercises that can be merged */}
-              {duplicateClusters.length > 0 && (
-                <div className="mb-4 p-3 bg-amber-900/20 border border-amber-700/40 rounded-lg">
-                  <p className="text-xs font-semibold text-amber-300 mb-2">
-                    Possible duplicates ({duplicateClusters.length}) — pick the name to keep, then merge.
+                <div className="p-4 bg-purple-950/30 border border-purple-900/50 rounded-lg">
+                  <p className="text-sm text-gray-400">Volume (Block)</p>
+                  <p className="text-2xl md:text-3xl font-bold text-purple-400">
+                    {Math.round(getTotalVolumeForBlock(currentBlock)).toLocaleString()}
                   </p>
-                  <div className="space-y-3">
-                    {duplicateClusters.map(cluster => {
-                      const clusterKey = [...cluster].sort().join('|');
-                      // Default keeper: a training-max entry if one exists, else the most descriptive (longest) name.
-                      const defaultKeeper = cluster.find(n => trainingMaxes[n])
-                        || [...cluster].sort((a, b) => b.length - a.length)[0];
-                      const keeper = mergeKeeper[clusterKey] || defaultKeeper;
-                      return (
-                        <div key={clusterKey} className="p-2 bg-gray-900/40 rounded-lg">
-                          <div className="flex flex-wrap gap-1.5 mb-2">
-                            {cluster.map(n => (
-                              <button
-                                key={n}
-                                onClick={() => setMergeKeeper(prev => ({ ...prev, [clusterKey]: n }))}
-                                className={`text-xs px-2 py-1 rounded-lg border transition-colors ${
-                                  n === keeper
-                                    ? 'bg-emerald-600/30 border-emerald-500 text-emerald-200'
-                                    : 'bg-gray-700 border-gray-600 text-gray-300 hover:bg-gray-600'
-                                }`}
-                                title={n === keeper ? 'Keeping this name' : 'Click to keep this name'}
-                              >
-                                {n === keeper && '✓ '}{n}
-                              </button>
-                            ))}
-                          </div>
-                          <button
-                            onClick={() => {
-                              const others = cluster.filter(n => n !== keeper);
-                              if (window.confirm(`Merge ${others.map(n => `"${n}"`).join(', ')} into "${keeper}"? History and PRs will be combined under "${keeper}".`)) {
-                                mergeExercises(others, keeper);
-                                setMergeKeeper(prev => { const c = { ...prev }; delete c[clusterKey]; return c; });
-                              }
-                            }}
-                            className="text-xs px-2 py-1 bg-amber-600 hover:bg-amber-500 text-white rounded-lg font-medium"
-                          >
-                            Merge into "{keeper}"
-                          </button>
-                        </div>
-                      );
-                    })}
-                  </div>
                 </div>
-              )}
-
-              {getAllExerciseNames.length === 0 ? (
-                <p className="text-gray-400 text-sm">No exercises logged yet.</p>
-              ) : (
-                <>
-                  <input
-                    type="text"
-                    placeholder="Filter exercises..."
-                    value={exFilter}
-                    onChange={e => setExFilter(e.target.value)}
-                    className="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded-lg text-gray-100 text-sm mb-3 placeholder-gray-500"
-                  />
-                  <div className="space-y-1 max-h-72 overflow-y-auto">
-                    {getAllExerciseNames
-                      .filter(n => n.toLowerCase().includes(exFilter.toLowerCase()))
-                      .map(name => (
-                        <div key={name} className="flex items-center gap-2 p-2 rounded-lg hover:bg-gray-700/50 group">
-                          {exRenameTarget === name ? (
-                            <>
-                              <input
-                                type="text"
-                                value={exRenameValue}
-                                onChange={e => setExRenameValue(e.target.value)}
-                                onKeyDown={e => {
-                                  if (e.key === 'Enter') { renameExercise(name, exRenameValue); setExRenameTarget(null); }
-                                  if (e.key === 'Escape') setExRenameTarget(null);
-                                }}
-                                autoFocus
-                                className="flex-1 px-2 py-1 bg-gray-600 border border-purple-500 rounded-lg text-gray-100 text-sm"
-                              />
-                              <button
-                                onClick={() => { renameExercise(name, exRenameValue); setExRenameTarget(null); }}
-                                className="text-xs px-2 py-1 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg"
-                              >Save</button>
-                              <button
-                                onClick={() => setExRenameTarget(null)}
-                                className="text-xs px-2 py-1 bg-gray-600 hover:bg-gray-500 text-gray-300 rounded-lg"
-                              >Cancel</button>
-                            </>
-                          ) : (
-                            <>
-                              <span className="flex-1 text-sm text-gray-200">{name}</span>
-                              <button
-                                onClick={() => { setExRenameTarget(name); setExRenameValue(name); }}
-                                className="opacity-0 group-hover:opacity-100 p-1 text-gray-400 hover:text-gray-200 transition-opacity"
-                                title="Rename"
-                              ><Edit3 className="w-3.5 h-3.5" /></button>
-                              <button
-                                onClick={() => {
-                                  if (window.confirm(`Delete all history for "${name}"? This removes it from all logs and PRs.`))
-                                    deleteExercise(name);
-                                }}
-                                className="opacity-0 group-hover:opacity-100 p-1 text-red-400 hover:text-red-300 transition-opacity"
-                                title="Delete"
-                              ><Trash2 className="w-3.5 h-3.5" /></button>
-                            </>
-                          )}
-                        </div>
-                      ))}
-                  </div>
-                </>
-              )}
+                <div className="p-4 bg-amber-950/30 border border-amber-900/50 rounded-lg">
+                  <p className="text-sm text-gray-400">Sessions (7d)</p>
+                  <p className="text-2xl md:text-3xl font-bold text-amber-400">
+                    {getSessionsInLastNDays(7)}
+                  </p>
+                </div>
+              </div>
             </div>
 
-            <div className="bg-gray-800 p-4 rounded-lg border border-gray-700">
+            {/* Exercise Trend — the hero chart: pick a frequently-logged exercise or search for one */}
+            <div className="bg-gray-800 p-4 md:p-6 rounded-lg border border-gray-700">
               <h3 className="font-semibold text-gray-100 mb-3 flex items-center gap-2">
-                <History className="w-5 h-5" />
-                Search Exercises
+                <TrendingUp className="w-5 h-5 text-emerald-400" />
+                Exercise Trend
               </h3>
+
               {Object.keys(workoutLogs).length === 0 ? (
-                <p className="text-gray-400 text-sm">No workouts logged yet</p>
+                <p className="text-gray-400 text-sm">Log a few workouts to see trends here.</p>
               ) : (
                 <>
+                  {topExerciseNames.length > 0 && (
+                    <div className="flex flex-wrap gap-1.5 mb-3">
+                      {topExerciseNames.map(name => (
+                        <button
+                          key={name}
+                          onClick={() => setSelectedExerciseHistory(name)}
+                          className={`text-xs px-3 py-1.5 rounded-lg border transition-colors ${
+                            selectedExerciseHistory === name
+                              ? 'bg-emerald-600/30 border-emerald-500 text-emerald-200'
+                              : 'bg-gray-700 border-gray-600 text-gray-300 hover:bg-gray-600'
+                          }`}
+                        >
+                          {name}
+                        </button>
+                      ))}
+                    </div>
+                  )}
                   <input
                     type="text"
-                    placeholder="Type to search exercises..."
+                    placeholder="Search for another exercise..."
                     value={exerciseSearchTerm}
                     onChange={(e) => setExerciseSearchTerm(e.target.value)}
-                    className="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded-lg text-gray-100 mb-3 placeholder-gray-500"
+                    className="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded-lg text-gray-100 mb-1 placeholder-gray-500 text-sm"
                   />
                   {exerciseSearchTerm && (() => {
                     const allExercises = new Set();
@@ -2110,41 +2011,48 @@ const WorkoutTracker = () => {
                     });
 
                     return allExercises.size > 0 ? (
-                      <div className="space-y-2 max-h-96 overflow-y-auto">
-                        {Array.from(allExercises).map(exerciseName => (
-                          <button
-                            key={exerciseName}
-                            onClick={() => setSelectedExerciseHistory(exerciseName)}
-                            className="w-full text-left p-3 bg-gray-700 hover:bg-gray-600 rounded-lg border border-gray-600 transition-colors"
-                          >
-                            <p className="font-medium text-gray-100">{exerciseName}</p>
-                            <p className="text-xs text-gray-400 mt-1">
-                              {getAllExerciseHistory(exerciseName).length} session(s)
-                            </p>
-                          </button>
-                        ))}
+                      <div className="space-y-2 max-h-96 overflow-y-auto mt-2">
+                        {Array.from(allExercises).map(exerciseName => {
+                          const hist = getAllExerciseHistory(exerciseName);
+                          const isStrength = hist.length > 0 && (hist[0].type || 'strength') === 'strength';
+                          const e1rmSeries = isStrength ? getExerciseProgressionData(exerciseName, 'e1rm') : [];
+                          return (
+                            <button
+                              key={exerciseName}
+                              onClick={() => { setSelectedExerciseHistory(exerciseName); setExerciseSearchTerm(''); }}
+                              className="w-full text-left p-3 bg-gray-700 hover:bg-gray-600 rounded-lg border border-gray-600 transition-colors"
+                            >
+                              <p className="font-medium text-gray-100">{exerciseName}</p>
+                              <p className="text-xs text-gray-400 mt-1">
+                                {hist.length} session{hist.length !== 1 ? 's' : ''}
+                                {e1rmSeries.length >= 2 && (
+                                  <> · e1RM {e1rmSeries[0].value} → <span className="text-emerald-400">{e1rmSeries[e1rmSeries.length - 1].value}</span></>
+                                )}
+                              </p>
+                            </button>
+                          );
+                        })}
                       </div>
                     ) : (
-                      <p className="text-gray-400 text-sm">No exercises found matching "{exerciseSearchTerm}"</p>
+                      <p className="text-gray-400 text-sm mt-2">No exercises found matching "{exerciseSearchTerm}"</p>
                     );
                   })()}
                 </>
               )}
-            </div>
 
-            {selectedExerciseHistory && (
-              <div className="bg-gray-800 p-4 rounded-lg border border-gray-700">
-                <div className="flex items-center justify-between mb-4">
-                  <h3 className="font-semibold text-gray-100">
-                    {selectedExerciseHistory} History
-                  </h3>
-                  <button
-                    onClick={() => setSelectedExerciseHistory(null)}
-                    className="p-1 hover:bg-gray-700 rounded text-gray-400"
-                  >
-                    <X className="w-4 h-4" />
-                  </button>
-                </div>
+              {selectedExerciseHistory && (
+                <div className="mt-4 pt-4 border-t border-gray-700">
+                  <div className="flex items-center justify-between mb-4">
+                    <h3 className="font-semibold text-gray-100">
+                      {selectedExerciseHistory} History
+                    </h3>
+                    <button
+                      onClick={() => setSelectedExerciseHistory(null)}
+                      className="p-1 hover:bg-gray-700 rounded text-gray-400"
+                    >
+                      <X className="w-4 h-4" />
+                    </button>
+                  </div>
 
                 {/* Chart Type Selector - Dynamic based on exercise type */}
                 {(() => {
@@ -2245,6 +2153,17 @@ const WorkoutTracker = () => {
                   return (
                     <div className="flex gap-2 mb-4">
                       <button
+                        onClick={() => setChartType('e1rm')}
+                        className={`px-3 py-1 rounded-lg text-sm transition-colors ${
+                          chartType === 'e1rm'
+                            ? 'bg-emerald-600 text-white'
+                            : 'bg-gray-700 text-gray-300 hover:bg-gray-600'
+                        }`}
+                        title="Estimated one-rep max (Epley formula) from the best set of each session"
+                      >
+                        e1RM
+                      </button>
+                      <button
                         onClick={() => setChartType('weight')}
                         className={`px-3 py-1 rounded-lg text-sm transition-colors ${
                           chartType === 'weight'
@@ -2252,7 +2171,7 @@ const WorkoutTracker = () => {
                             : 'bg-gray-700 text-gray-300 hover:bg-gray-600'
                         }`}
                       >
-                        Weight
+                        Top Set
                       </button>
                       <button
                         onClick={() => setChartType('volume')}
@@ -2263,16 +2182,6 @@ const WorkoutTracker = () => {
                         }`}
                       >
                         Volume
-                      </button>
-                      <button
-                        onClick={() => setChartType('reps')}
-                        className={`px-3 py-1 rounded-lg text-sm transition-colors ${
-                          chartType === 'reps'
-                            ? 'bg-emerald-600 text-white'
-                            : 'bg-gray-700 text-gray-300 hover:bg-gray-600'
-                        }`}
-                      >
-                        Reps
                       </button>
                     </div>
                   );
@@ -2461,10 +2370,12 @@ const WorkoutTracker = () => {
                               color: '#f3f4f6'
                             }}
                             formatter={(value) => {
-                              if (chartType === 'volume') {
+                              if (chartType === 'e1rm') {
+                                return [`${value} lb`, 'Est. 1RM'];
+                              } else if (chartType === 'volume') {
                                 return [`${value.toLocaleString()} lb`, 'Volume'];
                               } else if (chartType === 'weight') {
-                                return [`${value} lb`, 'Max Weight'];
+                                return [`${value} lb`, 'Top Set'];
                               } else if (chartType === 'reps') {
                                 return [`${value}`, 'Max Reps'];
                               } else if (chartType === 'distance') {
@@ -2570,8 +2481,252 @@ const WorkoutTracker = () => {
                     </>
                   );
                 })()}
-              </div>
-            )}
+                </div>
+              )}
+            </div>
+
+            {/* Block volume — total strength volume per week for the current block */}
+            <div className="bg-gray-800 p-4 md:p-6 rounded-lg border border-gray-700">
+              <h3 className="font-semibold text-gray-100 mb-3">Block Volume by Week</h3>
+              {(() => {
+                const weeklyVolume = getBlockWeeklyVolume(currentBlock);
+                if (weeklyVolume.length < 2) {
+                  return (
+                    <div className="p-4 bg-gray-700/50 rounded-lg border border-gray-600 text-center text-gray-400 text-sm">
+                      Log 2+ weeks of strength training to see a trend
+                    </div>
+                  );
+                }
+                return (
+                  <ResponsiveContainer width="100%" height={220}>
+                    <BarChart data={weeklyVolume}>
+                      <CartesianGrid strokeDasharray="3 3" stroke="#374151" />
+                      <XAxis dataKey="week" stroke="#9ca3af" tick={{ fill: '#9ca3af', fontSize: 12 }} />
+                      <YAxis stroke="#9ca3af" tick={{ fill: '#9ca3af', fontSize: 12 }} />
+                      <Tooltip
+                        contentStyle={{ backgroundColor: '#1f2937', border: '1px solid #374151', borderRadius: '0.5rem', color: '#f3f4f6' }}
+                        formatter={(value) => [`${value.toLocaleString()} lb`, 'Volume']}
+                      />
+                      <Bar dataKey="volume" fill="#10b981" radius={[4, 4, 0, 0]} />
+                    </BarChart>
+                  </ResponsiveContainer>
+                );
+              })()}
+            </div>
+
+            {/* Training Maxes — collapsed by default, this is admin/reference not a trend */}
+            <div className="bg-gray-800 p-4 rounded-lg border border-gray-700">
+              <button
+                onClick={() => setTmSectionOpen(o => !o)}
+                className="w-full flex items-center justify-between"
+              >
+                <h3 className="font-semibold text-gray-100 flex items-center gap-2">
+                  <Dumbbell className="w-5 h-5 text-purple-400" />
+                  Training Maxes ({Object.keys(trainingMaxes).length})
+                </h3>
+                <ChevronDown className={`w-4 h-4 text-gray-500 transition-transform ${tmSectionOpen ? 'rotate-180' : ''}`} />
+              </button>
+              {tmSectionOpen && (
+                <div className="mt-3">
+                  <div className="flex items-center justify-between mb-3 gap-2">
+                    <input
+                      type="text"
+                      placeholder="Filter training maxes..."
+                      value={tmFilter}
+                      onChange={e => setTmFilter(e.target.value)}
+                      className="flex-1 px-3 py-2 bg-gray-700 border border-gray-600 rounded-lg text-gray-100 text-sm placeholder-gray-500"
+                    />
+                    <button
+                      onClick={() => {
+                        setTmModalExercise('');
+                        setTmModalIsNew(true);
+                        setTmModalTrueRM('');
+                        setTmModalPercent(String(DEFAULT_TM_PERCENT));
+                        setTmModalCalcWeight('');
+                        setTmModalCalcReps('');
+                        setShowTMModal(true);
+                      }}
+                      className="text-xs px-3 py-2 bg-purple-700/40 hover:bg-purple-700/60 text-purple-300 rounded-lg border border-purple-700/50 flex items-center gap-1 shrink-0"
+                    >
+                      <Plus className="w-3 h-3" /> Add
+                    </button>
+                  </div>
+                  {Object.keys(trainingMaxes).length === 0 ? (
+                    <p className="text-gray-400 text-sm">No training maxes set. Select an exercise with an Est. 1RM and click "Set as Training Max".</p>
+                  ) : (
+                    <div className="grid md:grid-cols-2 gap-2">
+                      {Object.entries(trainingMaxes)
+                        .filter(([name]) => name.toLowerCase().includes(tmFilter.toLowerCase()))
+                        .map(([name, tm]) => {
+                          const startTM = tm.history && tm.history.length > 0 ? tm.history[0].trainingMax : null;
+                          const delta = startTM !== null ? Math.round((tm.trainingMax - startTM) * 10) / 10 : null;
+                          return (
+                            <div key={name} className="flex items-center justify-between p-3 bg-gray-900/50 rounded-lg border border-gray-700">
+                              <div className="min-w-0">
+                                <p className="font-medium text-gray-100 text-sm truncate">{name}</p>
+                                <p className="text-xs text-gray-400 mt-0.5">
+                                  1RM: {tm.true1RM} lb · {tm.trainingMaxPercent}% →{' '}
+                                  <span className="text-purple-300 font-medium">TM: {tm.trainingMax} lb</span>
+                                </p>
+                                {delta !== null && delta !== 0 && (
+                                  <p className={`text-xs mt-0.5 font-medium ${delta > 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+                                    {delta > 0 ? '+' : ''}{delta} lb since {tm.history[0].date}
+                                  </p>
+                                )}
+                                <p className="text-xs text-gray-500">Updated {tm.lastUpdated}</p>
+                              </div>
+                              <button
+                                onClick={() => {
+                                  setTmModalExercise(name);
+                                  setTmModalIsNew(false);
+                                  setTmModalTrueRM(String(tm.true1RM));
+                                  setTmModalPercent(String(tm.trainingMaxPercent));
+                                  setTmModalCalcWeight('');
+                                  setTmModalCalcReps('');
+                                  setShowTMModal(true);
+                                }}
+                                className="p-2 bg-gray-700 hover:bg-gray-600 text-gray-300 rounded-lg transition-colors shrink-0"
+                                title="Edit training max"
+                              >
+                                <Edit3 className="w-4 h-4" />
+                              </button>
+                            </div>
+                          );
+                        })}
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+
+            {/* Manage Exercises — admin, not progress, so it lives collapsed at the bottom */}
+            <div className="bg-gray-800 p-4 rounded-lg border border-gray-700">
+              <button
+                onClick={() => setManageExOpen(o => !o)}
+                className="w-full flex items-center justify-between"
+              >
+                <h3 className="font-semibold text-gray-100 flex items-center gap-2">
+                  <Edit3 className="w-5 h-5 text-gray-400" />
+                  Manage Exercises
+                </h3>
+                <ChevronDown className={`w-4 h-4 text-gray-500 transition-transform ${manageExOpen ? 'rotate-180' : ''}`} />
+              </button>
+              {manageExOpen && (
+                <div className="mt-3">
+                  {/* Possible duplicates — clusters of similarly-named exercises that can be merged */}
+                  {duplicateClusters.length > 0 && (
+                    <div className="mb-4 p-3 bg-amber-900/20 border border-amber-700/40 rounded-lg">
+                      <p className="text-xs font-semibold text-amber-300 mb-2">
+                        Possible duplicates ({duplicateClusters.length}) — pick the name to keep, then merge.
+                      </p>
+                      <div className="space-y-3">
+                        {duplicateClusters.map(cluster => {
+                          const clusterKey = [...cluster].sort().join('|');
+                          // Default keeper: a training-max entry if one exists, else the most descriptive (longest) name.
+                          const defaultKeeper = cluster.find(n => trainingMaxes[n])
+                            || [...cluster].sort((a, b) => b.length - a.length)[0];
+                          const keeper = mergeKeeper[clusterKey] || defaultKeeper;
+                          return (
+                            <div key={clusterKey} className="p-2 bg-gray-900/40 rounded-lg">
+                              <div className="flex flex-wrap gap-1.5 mb-2">
+                                {cluster.map(n => (
+                                  <button
+                                    key={n}
+                                    onClick={() => setMergeKeeper(prev => ({ ...prev, [clusterKey]: n }))}
+                                    className={`text-xs px-2 py-1 rounded-lg border transition-colors ${
+                                      n === keeper
+                                        ? 'bg-emerald-600/30 border-emerald-500 text-emerald-200'
+                                        : 'bg-gray-700 border-gray-600 text-gray-300 hover:bg-gray-600'
+                                    }`}
+                                    title={n === keeper ? 'Keeping this name' : 'Click to keep this name'}
+                                  >
+                                    {n === keeper && '✓ '}{n}
+                                  </button>
+                                ))}
+                              </div>
+                              <button
+                                onClick={() => {
+                                  const others = cluster.filter(n => n !== keeper);
+                                  if (window.confirm(`Merge ${others.map(n => `"${n}"`).join(', ')} into "${keeper}"? History and PRs will be combined under "${keeper}".`)) {
+                                    mergeExercises(others, keeper);
+                                    setMergeKeeper(prev => { const c = { ...prev }; delete c[clusterKey]; return c; });
+                                  }
+                                }}
+                                className="text-xs px-2 py-1 bg-amber-600 hover:bg-amber-500 text-white rounded-lg font-medium"
+                              >
+                                Merge into "{keeper}"
+                              </button>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  )}
+
+                  {getAllExerciseNames.length === 0 ? (
+                    <p className="text-gray-400 text-sm">No exercises logged yet.</p>
+                  ) : (
+                    <>
+                      <input
+                        type="text"
+                        placeholder="Filter exercises..."
+                        value={exFilter}
+                        onChange={e => setExFilter(e.target.value)}
+                        className="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded-lg text-gray-100 text-sm mb-3 placeholder-gray-500"
+                      />
+                      <div className="space-y-1 max-h-72 overflow-y-auto">
+                        {getAllExerciseNames
+                          .filter(n => n.toLowerCase().includes(exFilter.toLowerCase()))
+                          .map(name => (
+                            <div key={name} className="flex items-center gap-2 p-2 rounded-lg hover:bg-gray-700/50 group">
+                              {exRenameTarget === name ? (
+                                <>
+                                  <input
+                                    type="text"
+                                    value={exRenameValue}
+                                    onChange={e => setExRenameValue(e.target.value)}
+                                    onKeyDown={e => {
+                                      if (e.key === 'Enter') { renameExercise(name, exRenameValue); setExRenameTarget(null); }
+                                      if (e.key === 'Escape') setExRenameTarget(null);
+                                    }}
+                                    autoFocus
+                                    className="flex-1 px-2 py-1 bg-gray-600 border border-purple-500 rounded-lg text-gray-100 text-sm"
+                                  />
+                                  <button
+                                    onClick={() => { renameExercise(name, exRenameValue); setExRenameTarget(null); }}
+                                    className="text-xs px-2 py-1 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg"
+                                  >Save</button>
+                                  <button
+                                    onClick={() => setExRenameTarget(null)}
+                                    className="text-xs px-2 py-1 bg-gray-600 hover:bg-gray-500 text-gray-300 rounded-lg"
+                                  >Cancel</button>
+                                </>
+                              ) : (
+                                <>
+                                  <span className="flex-1 text-sm text-gray-200">{name}</span>
+                                  <button
+                                    onClick={() => { setExRenameTarget(name); setExRenameValue(name); }}
+                                    className="opacity-0 group-hover:opacity-100 p-1 text-gray-400 hover:text-gray-200 transition-opacity"
+                                    title="Rename"
+                                  ><Edit3 className="w-3.5 h-3.5" /></button>
+                                  <button
+                                    onClick={() => {
+                                      if (window.confirm(`Delete all history for "${name}"? This removes it from all logs and PRs.`))
+                                        deleteExercise(name);
+                                    }}
+                                    className="opacity-0 group-hover:opacity-100 p-1 text-red-400 hover:text-red-300 transition-opacity"
+                                    title="Delete"
+                                  ><Trash2 className="w-3.5 h-3.5" /></button>
+                                </>
+                              )}
+                            </div>
+                          ))}
+                      </div>
+                    </>
+                  )}
+                </div>
+              )}
+            </div>
 
           </div>
         )}
