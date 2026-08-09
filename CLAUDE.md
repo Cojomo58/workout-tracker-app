@@ -164,6 +164,14 @@ trainingMaxes = {
 - Dismissing the modal any way (X, picking an option) sets the `onboarding-complete` localStorage flag so it never reappears for that browser.
 - Empty-state UI: Calendar day cards show "No workout planned" + a "Set up in Template →" link when a day has no exercises; the Template editor shows "No exercises yet — add your first exercise below." per empty day; the log view header falls back to "Workout" when the day has no name.
 
+## Progress Tab (v2.6)
+- Order top to bottom: 4 stat tiles (workouts this block, current week, total strength volume this block via `getTotalVolumeForBlock()`, sessions in the last 7 days via `getSessionsInLastNDays()`) → **Exercise Trend** (the hero) → **Block Volume by Week** bar chart → **Training Maxes** (collapsed by default) → **Manage Exercises** (collapsed by default, moved to the bottom — it's admin, not progress).
+- **Exercise Trend**: chips for the 6 most-frequently-logged exercises (`topExerciseNames` memo, sorted by log count) plus a fuzzy search input for anything else; both drive the existing `selectedExerciseHistory` state. Search result rows show `N sessions · e1RM X → Y` when the exercise is strength and has 2+ e1RM points.
+- Strength exercises default to an **e1RM** chart (`chartType` state defaults to `'e1rm'` now, not `'weight'`); the metric toggle is e1RM / Top Set (renamed from "Weight") / Volume — "Reps" was dropped from this toggle. `getExerciseProgressionData(name, 'e1rm')` takes the best `calculateEstimated1RM(weight, reps)` across each session's sets. Cardio/tabata/bodyweight keep their existing per-type toggles unchanged.
+- **Block Volume by Week**: `getBlockWeeklyVolume(blockNum)` sums strength-only volume per week from `workoutLogs` keys matching `block{N}-week{W}-*`, rendered as a Recharts `BarChart`. Needs 2+ weeks of data or shows an empty-state message.
+- **Training Maxes** section: `tmSectionOpen` state (default closed), its own `tmFilter` search (separate from Manage Exercises' `exFilter` — don't reuse one for both), `grid md:grid-cols-2` cards. Each card shows a delta line (`+15 lb since 2026-03-03`) computed from `tm.history[0].trainingMax` vs current `tm.trainingMax`, only when non-zero.
+- **Manage Exercises** section: `manageExOpen` state (default closed); content (duplicate-merge tool + rename/delete list) unchanged, just relocated and collapsed.
+
 ## Duplicate Exercise Detection (v2.4)
 - Module-level pure helpers (top of App.jsx): `EXERCISE_ABBREV` (db→dumbbell, bb→barbell, ohp→overhead press, etc.), `normalizeExerciseTokens()` (lowercase, expand abbreviations, strip stop-words, crude singularize), `exerciseSimilarity()` (Jaccard over normalized token sets), `findSimilarExercise(name, candidates, threshold=0.6)`.
 - `allKnownExerciseNames` memo: dedup pool of every name across logs + training maxes + template — the candidate set for detection.
