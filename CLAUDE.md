@@ -193,10 +193,31 @@ Logged in:   React State ←→ localStorage (cache) + Supabase (cloud, debounce
 
 ## Logging Screen (mobile-first, v2.5)
 - Exercise cards in the log view are an **accordion** (`expandedExIdx` state, single index, `null` = all collapsed). Opening a new day's log defaults to expanding the first exercise. Adding an exercise expands it; removing one re-targets `expandedExIdx` to stay valid.
-- Collapsed card = one row: reorder arrows (mobile only, `moveExercise(idx, direction)` swaps neighbors since HTML5 drag doesn't work on touch) / `GripVertical` drag handle (desktop only, `md:` breakpoint), name, `ExerciseTypeBadge`, template target, `filled/total` set count (`countFilledSets()`), chevron. Tap the row to expand/collapse.
+- Collapsed card = one row: reorder arrows (mobile only, `moveExercise(idx, direction)` swaps neighbors since HTML5 drag doesn't work on touch) / `GripVertical` drag handle (desktop only, `md:` breakpoint), name, `ExerciseTypeBadge`, template target, `completed/total` set count, chevron. Tap the row to expand/collapse.
 - Set rows are a CSS grid (`grid-cols-[2.25rem_1fr_1fr_2rem]` for strength/bodyweight; wider variants for cardio/tabata), not `flex flex-wrap` — this is what keeps one set to one row on a 375px screen.
 - `NumberField` (module-level component, alongside `ExerciseTypeBadge`/`ModalHeader`) is the `− [input] +` stepper used for every numeric set field; the `%TM` badge and the improved/matched comparison arrow moved out of the input row into a sub-line beneath it.
-- The Save Workout button lives in a `sticky bottom-0` footer bar at the bottom of the log view; the bar has room reserved for draft-save status and set-progress text added by later work.
+- The Save Workout button lives in a `sticky bottom-0` footer bar at the bottom of the log view, alongside a `completed/total` sets readout and the draft-save status text (see below).
+
+### Set completion (v2.6)
+- Each set object carries an optional `completed` boolean (undefined/false = not done); it's real session data and is persisted in the saved log (only `weightSource` is stripped from sets before saving, `completed` passes through).
+- The set-number chip (round button, left column of every set row) toggles `completed`; the icon swaps to a checkmark, the row dims (`opacity-60`) and gets an emerald left border, but every field stays editable.
+- `toggleSetCompleted(exIdx, setIdx)` (defined near `moveExercise`) handles the toggle: on completion it fills empty fields via `prefillSetOnComplete()` (previous set in the same exercise → template target/%TM → last session's matching set, first non-empty wins), auto-starts the rest timer, and — once every set in the card is done — auto-advances `expandedExIdx` to the next exercise with an incomplete set (skipped if a text input is currently focused).
+- The old "matched previous session" `✓`/`↑` markers still exist but as labeled text (`↑ improved` / `✓ matched`) in the sub-line under the weight field — kept visually distinct from the new completion checkmark.
+
+### Rest timer (v2.6, global + persistent)
+- One rest timer per session, not per exercise. State shape: `{ exIdx, exName, endsAt, running, remainingMs }` — timestamp-based (`endsAt`), not tick-decremented, so backgrounding the tab doesn't cause drift; a 1s interval (`restTick` state) just forces a re-render, and the displayed remaining time is always computed fresh from `endsAt - Date.now()`.
+- Persisted to localStorage key `rest-timer` (written with a `_savedAt` stamp on every change); restored on mount and dropped if `_savedAt` is more than 10 minutes old. Mute preference persisted separately as `rest-timer-muted`.
+- Rendered as a bar directly above the sticky Save Workout footer — visible regardless of which exercise card is expanded, and **not** cleared when leaving the log view (only `Save Workout` calls `stopRestTimer()`). When no timer is running, a manual "Start Rest" control targets whichever exercise is currently expanded.
+- `parseRestSeconds(restStr)` parses a template `rest` string ("2-3 min", "90 sec") into seconds for auto-start; `templateRest` is threaded through every exercise-construction site (template prefill, last-week prefill, "Use Template", "Load Last Week") alongside the existing `templateReps`/`templateTarget` and is stripped (UI-only) before saving.
+- Completion plays `navigator.vibrate` and a short WebAudio beep (`ensureRestAudioCtx()`/`playRestBeep()`); the AudioContext is created/resumed inside the same click handler that starts the timer (a user gesture) since iOS Safari blocks audio otherwise.
+
+### Draft autosave (v2.6)
+- `loadDayIntoLogView(day, { skipDraft })` (near `moveExercise`) is the single entry point for opening a day's log — replaces what used to be an inline calendar-card `onClick`. It checks for an unsaved draft first (unless `skipDraft`), else falls back to the existing saved log, then last-week prefill, then the template.
+- Drafts live in one localStorage key `workout-drafts`: `{ [logKey]: { date, exercises, savedAt } }`. Written on a 500ms debounce from a `useEffect` on `[exercises, logDate]`, but only once the current state actually differs from `openedSnapshotRef` (a JSON snapshot taken when the day was opened) — so opening and immediately closing a day writes nothing. Flushed immediately on `visibilitychange → hidden` / `pagehide`; a `beforeunload` prompt only fires during the brief window a debounced write hasn't landed yet. Pruned (14-day cutoff) once on mount.
+- Opening a day with a newer draft shows a blue "Restored unsaved draft from Ns ago" banner with a **Start fresh** link (`deleteDraft` + reload via `loadDayIntoLogView(day, { skipDraft: true })`).
+- The sticky footer's left slot shows `completed/total sets` and `Saving…` / `Saved Ns ago` (`timeAgo()`, refreshed every 30s via `footerTick`).
+- The log view's X button opens an exit-guard modal (Save Workout / Leave-keep-draft / Discard-draft) only when the current state differs from `openedSnapshotRef`; switching to Calendar/Progress/Template never prompts.
+- `Save Workout` deletes the draft for that `logKey` and stops the rest timer on success — the draft only represents *unsaved* state.
 
 ## Storage
 
@@ -207,6 +228,9 @@ Logged in:   React State ←→ localStorage (cache) + Supabase (cloud, debounce
 - `current-block`: Active block number (integer)
 - `block-metadata`: Named cycle metadata `{ [blockNum]: { name, startDate } }`
 - `training-maxes`: Training max weights `{ [exerciseName]: { true1RM, trainingMaxPercent, trainingMax, lastUpdated } }`
+- `workout-drafts`: In-progress (unsaved) log edits, keyed by logKey — `{ [logKey]: { date, exercises, savedAt } }`; deleted per-key on Save Workout, pruned after 14 days
+- `rest-timer`: The single active rest timer, if any — `{ exIdx, exName, endsAt, running, remainingMs, _savedAt }`; dropped on restore if `_savedAt` is over 10 minutes old
+- `rest-timer-muted`: `"true"` / `"false"` — rest timer completion sound preference
 
 ### Supabase `user_data` Table (when logged in)
 | Column | Type | Purpose |

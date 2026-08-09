@@ -1,5 +1,5 @@
 import React, { useState, useMemo, useCallback, useRef } from 'react';
-import { Plus, Minus, ChevronLeft, ChevronRight, ChevronDown, ArrowUp, ArrowDown, TrendingUp, Calendar, Dumbbell, Save, X, History, Settings, Trash2, Edit3, Trophy, LogIn, LogOut, GripVertical, Timer } from 'lucide-react';
+import { Plus, Minus, ChevronLeft, ChevronRight, ChevronDown, ArrowUp, ArrowDown, TrendingUp, Calendar, Dumbbell, Save, X, History, Settings, Trash2, Edit3, Trophy, LogIn, LogOut, GripVertical, Timer, Check, Volume2, VolumeX } from 'lucide-react';
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
 import Fuse from 'fuse.js';
 import { supabase } from './supabaseClient';
@@ -242,17 +242,6 @@ function NumberField({ value, onChange, step = 1, placeholder = '', ariaLabel, m
   );
 }
 
-// Count sets that have at least their primary field filled in, for the collapsed-card "2/3" readout.
-const countFilledSets = (sets, type) => {
-  if (!sets || sets.length === 0) return 0;
-  return sets.filter(s => {
-    if (type === 'cardio') return (s.distance && String(s.distance).trim()) && (s.time && String(s.time).trim());
-    if (type === 'tabata') return s.rounds && String(s.rounds).trim();
-    if (type === 'bodyweight') return s.reps && String(s.reps).trim();
-    return s.weight && String(s.weight).trim() && s.reps && String(s.reps).trim();
-  }).length;
-};
-
 const WorkoutTracker = () => {
   const [view, setView] = useState('calendar');
   const [currentBlock, setCurrentBlock] = useState(1);
@@ -269,6 +258,15 @@ const WorkoutTracker = () => {
   const [prefilled, setPrefilled] = useState(false);
   // Accordion: which exercise card is open on the mobile-first logging screen (null = all collapsed)
   const [expandedExIdx, setExpandedExIdx] = useState(0);
+
+  // Draft autosave (workout-drafts) — tracks unsaved edits to the log currently open
+  const [draftSavedAt, setDraftSavedAt] = useState(null);
+  const [draftSaving, setDraftSaving] = useState(false);
+  const [draftBanner, setDraftBanner] = useState(null); // { savedAt } when a restored draft is showing
+  const [showExitConfirm, setShowExitConfirm] = useState(false);
+  const [footerTick, setFooterTick] = useState(0); // forces the "N min ago" footer text to refresh
+  const openedSnapshotRef = useRef(null); // JSON snapshot of exercises/logDate when the day was opened — dirty-checked against
+  const draftDebounceRef = useRef(null);
   const [draggedExIdx, setDraggedExIdx] = useState(null);
   const [dragOverExIdx, setDragOverExIdx] = useState(null);
   const [draggedTemplateEx, setDraggedTemplateEx] = useState(null);
@@ -326,16 +324,60 @@ const WorkoutTracker = () => {
   const [exFilter, setExFilter] = useState('');
   const saveTimeoutRef = useRef(null);
 
-  // Rest Timer State (transient — not persisted)
+  // Rest Timer — global, timestamp-based (not tick-decremented) so it survives backgrounding
+  // without drifting, and persisted to localStorage so it survives a refresh.
   const [restDuration, setRestDuration] = useState(90);
-  const [restTimer, setRestTimer] = useState(null); // { exIdx, remaining, running }
+  const [restTimer, setRestTimer] = useState(null); // { exIdx, exName, endsAt, running, remainingMs }
+  const [restMuted, setRestMuted] = useState(() => {
+    try { return localStorage.getItem('rest-timer-muted') === 'true'; } catch { return false; }
+  });
+  const [restTick, setRestTick] = useState(0); // bumped every second while running, just to force a re-render
+  const restAudioCtxRef = useRef(null);
 
-  const startRestTimer = (exIdx) => {
-    setRestTimer({ exIdx, remaining: restDuration, running: true });
+  const ensureRestAudioCtx = () => {
+    try {
+      if (!restAudioCtxRef.current) {
+        const Ctx = window.AudioContext || window.webkitAudioContext;
+        if (Ctx) restAudioCtxRef.current = new Ctx();
+      }
+      if (restAudioCtxRef.current && restAudioCtxRef.current.state === 'suspended') {
+        restAudioCtxRef.current.resume();
+      }
+    } catch { /* no audio support — vibrate-only fallback below */ }
+  };
+
+  const playRestBeep = () => {
+    const ctx = restAudioCtxRef.current;
+    if (!ctx || restMuted) return;
+    try {
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.frequency.value = 880;
+      gain.gain.setValueAtTime(0.0001, ctx.currentTime);
+      gain.gain.exponentialRampToValueAtTime(0.3, ctx.currentTime + 0.02);
+      gain.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime + 0.3);
+      osc.connect(gain).connect(ctx.destination);
+      osc.start();
+      osc.stop(ctx.currentTime + 0.32);
+    } catch { /* ignore */ }
+  };
+
+  // exName/durationSeconds let callers (manual button, auto-start-on-set-complete) label the
+  // timer and pick a duration without the timer needing to know about the exercise list.
+  const startRestTimer = (exIdx, exName, durationSeconds) => {
+    ensureRestAudioCtx();
+    const seconds = durationSeconds ?? restDuration;
+    setRestTimer({ exIdx, exName, endsAt: Date.now() + seconds * 1000, running: true });
   };
 
   const pauseResumeRestTimer = () => {
-    setRestTimer(prev => (prev ? { ...prev, running: !prev.running } : prev));
+    setRestTimer(prev => {
+      if (!prev) return prev;
+      if (prev.running) {
+        return { ...prev, running: false, remainingMs: Math.max(0, prev.endsAt - Date.now()) };
+      }
+      return { ...prev, running: true, endsAt: Date.now() + Math.max(0, prev.remainingMs ?? 0) };
+    });
   };
 
   const stopRestTimer = () => {
@@ -343,12 +385,34 @@ const WorkoutTracker = () => {
   };
 
   const adjustRestTimer = (deltaSeconds) => {
-    setRestTimer(prev => (prev ? { ...prev, remaining: Math.max(0, prev.remaining + deltaSeconds) } : prev));
+    setRestTimer(prev => {
+      if (!prev) return prev;
+      if (prev.running) {
+        return { ...prev, endsAt: prev.endsAt + deltaSeconds * 1000 };
+      }
+      return { ...prev, remainingMs: Math.max(0, (prev.remainingMs ?? 0) + deltaSeconds * 1000) };
+    });
   };
 
   const adjustRestDuration = (deltaSeconds) => {
     setRestDuration(prev => Math.max(15, prev + deltaSeconds));
   };
+
+  // Parse a template rest string like "2-3 min" or "90 sec" into seconds; null if unparseable ("N/A", empty).
+  const parseRestSeconds = (restStr) => {
+    if (!restStr) return null;
+    const s = String(restStr).toLowerCase();
+    const match = s.match(/(\d+(\.\d+)?)/);
+    if (!match) return null;
+    const num = parseFloat(match[1]);
+    if (s.includes('sec')) return Math.round(num);
+    return Math.round(num * 60); // "min", or no unit — assume minutes
+  };
+
+  const restRemainingMs = restTimer
+    ? (restTimer.running ? Math.max(0, restTimer.endsAt - Date.now()) : Math.max(0, restTimer.remainingMs ?? 0))
+    : 0;
+  const restRemainingSeconds = Math.ceil(restRemainingMs / 1000);
 
   // Migrate PRs from historical workout data
   const migrateHistoricalPRs = (logs) => {
@@ -770,36 +834,196 @@ const WorkoutTracker = () => {
     };
   }, [upsertToSupabase]);
 
-  // Rest timer countdown tick
+  // Rest timer tick — re-renders every second while running so the countdown display (computed
+  // from endsAt/Date.now() at render time, not decremented here) stays live. Also fires the
+  // completion vibrate/beep exactly once, when remaining first reaches zero.
   React.useEffect(() => {
     if (!restTimer || !restTimer.running) return;
 
     const id = setInterval(() => {
-      setRestTimer(prev => {
-        if (!prev || !prev.running) return prev;
-        if (prev.remaining <= 1) {
-          return { ...prev, remaining: 0, running: false };
-        }
-        return { ...prev, remaining: prev.remaining - 1 };
-      });
+      const remaining = Math.max(0, restTimer.endsAt - Date.now());
+      if (remaining <= 0) {
+        setRestTimer(prev => (prev && prev.running) ? { ...prev, running: false, remainingMs: 0 } : prev);
+        if (navigator.vibrate) navigator.vibrate([200, 100, 200]);
+        playRestBeep();
+      } else {
+        setRestTick(t => t + 1);
+      }
     }, 1000);
 
     return () => clearInterval(id);
-  }, [restTimer?.running, restTimer?.exIdx]);
+  }, [restTimer?.running, restTimer?.exIdx, restTimer?.endsAt]);
 
-  // Vibrate once when the rest timer finishes
+  // Recompute immediately when the tab regains visibility — setInterval is throttled/paused while
+  // backgrounded, but since remaining is derived from a wall-clock timestamp this just needs a nudge.
   React.useEffect(() => {
-    if (restTimer && restTimer.remaining === 0 && navigator.vibrate) {
-      navigator.vibrate([200, 100, 200]);
-    }
-  }, [restTimer?.remaining]);
+    const onVisibilityChange = () => {
+      if (document.visibilityState === 'visible') setRestTick(t => t + 1);
+    };
+    document.addEventListener('visibilitychange', onVisibilityChange);
+    return () => document.removeEventListener('visibilitychange', onVisibilityChange);
+  }, []);
 
-  // Clear the rest timer when leaving the logging view
+  // Persist the rest timer across refresh/close. Restore it on mount, dropping it if stale (the
+  // page was closed for more than 10 minutes) rather than showing a wildly wrong countdown.
   React.useEffect(() => {
-    if (view !== 'log') {
-      setRestTimer(null);
+    try {
+      const saved = localStorage.getItem('rest-timer');
+      if (!saved) return;
+      const parsed = JSON.parse(saved);
+      if (!parsed || typeof parsed._savedAt !== 'number' || Date.now() - parsed._savedAt > 10 * 60 * 1000) {
+        localStorage.removeItem('rest-timer');
+        return;
+      }
+      delete parsed._savedAt;
+      setRestTimer(parsed);
+    } catch { /* ignore malformed/unavailable storage */ }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  React.useEffect(() => {
+    try {
+      if (restTimer) {
+        localStorage.setItem('rest-timer', JSON.stringify({ ...restTimer, _savedAt: Date.now() }));
+      } else {
+        localStorage.removeItem('rest-timer');
+      }
+    } catch { /* ignore quota errors */ }
+  }, [restTimer]);
+
+  React.useEffect(() => {
+    try { localStorage.setItem('rest-timer-muted', String(restMuted)); } catch { /* ignore */ }
+  }, [restMuted]);
+
+  // --- Draft autosave (workout-drafts) ---
+  // Everything typed on the logging screen lives only in `exercises` state until Save Workout is
+  // pressed. Autosave a debounced draft per logKey so an accidental X / refresh / crash doesn't
+  // lose the session; Save Workout deletes the draft for that key once it actually commits.
+  const readDrafts = () => {
+    try {
+      const raw = localStorage.getItem('workout-drafts');
+      return raw ? JSON.parse(raw) : {};
+    } catch { return {}; }
+  };
+
+  const writeDraftsObject = (drafts) => {
+    try { localStorage.setItem('workout-drafts', JSON.stringify(drafts)); } catch { /* quota exceeded — drop silently */ }
+  };
+
+  const pruneOldDrafts = (drafts) => {
+    const cutoff = Date.now() - 14 * 24 * 60 * 60 * 1000;
+    const next = {};
+    Object.entries(drafts).forEach(([k, v]) => { if (v?.savedAt && v.savedAt >= cutoff) next[k] = v; });
+    return next;
+  };
+
+  const currentLogKey = selectedDay ? `block${currentBlock}-week${currentWeek}-${selectedDay}` : null;
+
+  const saveDraftNow = () => {
+    if (!currentLogKey) return;
+    const drafts = pruneOldDrafts(readDrafts());
+    const savedAt = Date.now();
+    drafts[currentLogKey] = { date: logDate, exercises, savedAt };
+    writeDraftsObject(drafts);
+    setDraftSavedAt(savedAt);
+    setDraftSaving(false);
+  };
+
+  const deleteDraft = (logKey) => {
+    const drafts = readDrafts();
+    if (drafts[logKey]) {
+      delete drafts[logKey];
+      writeDraftsObject(drafts);
     }
+  };
+
+  const timeAgo = (ms) => {
+    if (!ms) return 'a moment ago';
+    const seconds = Math.max(0, Math.round((Date.now() - ms) / 1000));
+    if (seconds < 10) return 'just now';
+    if (seconds < 60) return `${seconds}s ago`;
+    const minutes = Math.round(seconds / 60);
+    if (minutes < 60) return `${minutes} min ago`;
+    const hours = Math.round(minutes / 60);
+    return `${hours}h ago`;
+  };
+
+  // Prune stale drafts once on mount
+  React.useEffect(() => {
+    writeDraftsObject(pruneOldDrafts(readDrafts()));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Debounced draft write — skipped until the exercises/date actually differ from what the day
+  // was opened with, so simply opening and closing a log without editing it writes nothing.
+  React.useEffect(() => {
+    if (view !== 'log' || !currentLogKey) return;
+    const snapshot = JSON.stringify({ exercises, logDate });
+    if (openedSnapshotRef.current === null) {
+      openedSnapshotRef.current = snapshot;
+      return;
+    }
+    if (snapshot === openedSnapshotRef.current) return;
+
+    setDraftSaving(true);
+    if (draftDebounceRef.current) clearTimeout(draftDebounceRef.current);
+    draftDebounceRef.current = setTimeout(() => {
+      draftDebounceRef.current = null;
+      saveDraftNow();
+    }, 500);
+
+    return () => {
+      if (draftDebounceRef.current) {
+        clearTimeout(draftDebounceRef.current);
+        draftDebounceRef.current = null;
+      }
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [exercises, logDate, view, currentLogKey]);
+
+  // Flush a pending draft write immediately when the tab is hidden/closed — the 500ms debounce
+  // can get frozen before it fires on mobile.
+  React.useEffect(() => {
+    const flushDraft = () => {
+      if (draftDebounceRef.current) {
+        clearTimeout(draftDebounceRef.current);
+        draftDebounceRef.current = null;
+        saveDraftNow();
+      }
+    };
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'hidden') flushDraft();
+    };
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    window.addEventListener('pagehide', flushDraft);
+    return () => {
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+      window.removeEventListener('pagehide', flushDraft);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentLogKey, logDate, exercises]);
+
+  // Native "leave site?" prompt only while a debounced draft write hasn't landed yet (~500ms window) —
+  // switching app tabs (Calendar/Progress/Template) never hits this since it doesn't unload the page.
+  React.useEffect(() => {
+    const handleBeforeUnload = (e) => {
+      if (draftDebounceRef.current) {
+        e.preventDefault();
+        e.returnValue = '';
+      }
+    };
+    window.addEventListener('beforeunload', handleBeforeUnload);
+    return () => window.removeEventListener('beforeunload', handleBeforeUnload);
+  }, []);
+
+  // Refresh the "N min ago" footer text periodically without re-running the autosave logic
+  React.useEffect(() => {
+    if (view !== 'log') return;
+    const id = setInterval(() => setFooterTick(t => t + 1), 30000);
+    return () => clearInterval(id);
   }, [view]);
+
+  // Accordion defaults to the first exercise expanded whenever a new day's log is opened
 
   // Accordion defaults to the first exercise expanded whenever a new day's log is opened
   React.useEffect(() => {
@@ -1801,6 +2025,192 @@ const WorkoutTracker = () => {
     [newExercises[idx], newExercises[targetIdx]] = [newExercises[targetIdx], newExercises[idx]];
     setExercises(newExercises);
     setExpandedExIdx(prev => (prev === idx ? targetIdx : prev === targetIdx ? idx : prev));
+  };
+
+  // Opens a day's log: restores an in-progress draft if one exists (unless skipDraft, used by
+  // "Start fresh"), else loads the saved log, else prefills from last week or the template.
+  const loadDayIntoLogView = (day, { skipDraft = false } = {}) => {
+    const logKey = `block${currentBlock}-week${currentWeek}-${day}`;
+    setSelectedDay(day);
+    openedSnapshotRef.current = null;
+    setDraftSavedAt(null); // avoid showing the previous day's "Saved Ns ago" until this one autosaves
+
+    if (!skipDraft) {
+      const draft = readDrafts()[logKey];
+      if (draft) {
+        setLogDate(draft.date || new Date().toISOString().split('T')[0]);
+        setExercises(draft.exercises || []);
+        setPrefilled(false);
+        setDraftBanner({ savedAt: draft.savedAt });
+        setDraftSavedAt(draft.savedAt);
+        setView('log');
+        return;
+      }
+    }
+    setDraftBanner(null);
+
+    const template = getCurrentTemplate();
+    const workout = template[day];
+    const existingLog = workoutLogs[logKey];
+
+    if (existingLog) {
+      setLogDate(existingLog.date);
+      setExercises(existingLog.exercises);
+      setPrefilled(false);
+    } else {
+      setLogDate(new Date().toISOString().split('T')[0]);
+
+      // Auto-populate from previous week's same day
+      const prevWeekKey = currentWeek > 1
+        ? `block${currentBlock}-week${currentWeek - 1}-${day}`
+        : null;
+      const prevWeekLog = prevWeekKey ? workoutLogs[prevWeekKey] : null;
+
+      if (prevWeekLog && prevWeekLog.exercises && prevWeekLog.exercises.length > 0) {
+        const templateExercises = workout?.exercises || [];
+        setExercises(prevWeekLog.exercises.map(ex => {
+          const exType = ex.type || 'strength';
+          const tmplEx = templateExercises.find(t => t.name === ex.name);
+
+          // If template has a weekly progression for this week, use it to set weight
+          const weekOverride = tmplEx?.weeklyProgression?.find(w => w.week === currentWeek) ?? null;
+          const effectivePct  = weekOverride?.percentage ?? null;
+          const effectiveSets = weekOverride?.sets ?? null;
+          const effectiveReps = weekOverride?.reps ?? null;
+
+          const tmLookup = tmplEx?.tmLink || ex.name;
+          const pctWeight = (effectivePct && exType === 'strength')
+            ? getPercentageWeight(tmLookup, effectivePct)
+            : null;
+          const targetReps = effectiveReps ? parseTargetReps(effectiveReps) : null;
+
+          return {
+            name: ex.name,
+            type: exType,
+            technique: ex.technique,
+            templateTarget: (effectiveSets && effectiveReps)
+              ? `${effectiveSets}×${effectiveReps}`
+              : (tmplEx ? `${tmplEx.sets}×${tmplEx.reps}` : null),
+            templatePercentage: effectivePct || tmplEx?.percentage || null,
+            templateReps: effectiveReps || tmplEx?.reps || null,
+            templateRest: tmplEx?.rest || null,
+            tmLink: tmplEx?.tmLink || null,
+            sets: ex.sets.map(s =>
+              exType === 'bodyweight'
+                ? { reps: s.reps || '', holdTime: s.holdTime || '' }
+                : exType === 'cardio'
+                  ? { distance: s.distance || '', time: s.time || '', unit: s.unit || 'miles' }
+                  : exType === 'tabata'
+                    ? { rounds: s.rounds || '', workSeconds: s.workSeconds || '20', restSeconds: s.restSeconds || '10', calories: s.calories || '' }
+                    : {
+                        weight: pctWeight ? String(pctWeight) : (s.weight || ''),
+                        reps: targetReps || s.reps || '',
+                        ...(pctWeight ? { weightSource: 'tm-pct' } : {})
+                      }
+            ),
+            notes: ex.notes || ''
+          };
+        }));
+        setPrefilled(true);
+      } else {
+        setExercises(workout?.exercises.map(ex => {
+          const exType = ex.type || 'strength';
+
+          // Apply weekly progression override if one exists for currentWeek
+          const weekOverride = ex.weeklyProgression?.find(w => w.week === currentWeek) ?? null;
+          const effectivePct  = weekOverride?.percentage  ?? ex.percentage;
+          const effectiveSets = weekOverride?.sets        ?? ex.sets;
+          const effectiveReps = weekOverride?.reps        ?? ex.reps;
+
+          // Auto-fill weight from % of TM (use tmLink if set)
+          const tmLookup = ex.tmLink || ex.name;
+          const pctWeight = (effectivePct && exType === 'strength')
+            ? getPercentageWeight(tmLookup, effectivePct)
+            : null;
+          const targetReps = parseTargetReps(effectiveReps);
+          return {
+            name: ex.name,
+            type: exType,
+            technique: ex.technique,
+            templateTarget: (effectiveSets && effectiveReps) ? `${effectiveSets}×${effectiveReps}` : null,
+            templatePercentage: effectivePct || null,
+            templateReps: effectiveReps || null,
+            templateRest: ex.rest || null,
+            tmLink: ex.tmLink || null,
+            sets: Array(parseInt(effectiveSets) || 3).fill(null).map(() => ({
+              weight: pctWeight ? String(pctWeight) : '',
+              reps: targetReps,
+              weightSource: pctWeight ? 'tm-pct' : 'manual'
+            })),
+            notes: ''
+          };
+        }) || []);
+        setPrefilled(false);
+      }
+    }
+    setView('log');
+  };
+
+  // Best available fill for a set's empty fields when it's marked complete: the previous set in
+  // this exercise, then the template target/%TM, then the matching set from the last session.
+  const prefillSetOnComplete = (exercise, setIdx, previousSession) => {
+    const type = exercise.type || 'strength';
+    const set = exercise.sets[setIdx];
+    const prevSetInExercise = setIdx > 0 ? exercise.sets[setIdx - 1] : null;
+    const prevSessionSet = previousSession?.sets?.[setIdx] || null;
+    const filled = { ...set };
+
+    if (type === 'bodyweight') {
+      if (!filled.reps) filled.reps = prevSetInExercise?.reps || parseTargetReps(exercise.templateReps) || prevSessionSet?.reps || '';
+      if (!filled.holdTime) filled.holdTime = prevSetInExercise?.holdTime || prevSessionSet?.holdTime || '';
+    } else if (type === 'cardio') {
+      if (!filled.distance) filled.distance = prevSetInExercise?.distance || prevSessionSet?.distance || '';
+      if (!filled.time) filled.time = prevSetInExercise?.time || prevSessionSet?.time || '';
+    } else if (type === 'tabata') {
+      if (!filled.rounds) filled.rounds = prevSetInExercise?.rounds || prevSessionSet?.rounds || '';
+    } else {
+      if (!filled.weight) {
+        const tmLookup = exercise.tmLink || exercise.name;
+        const pctWeight = exercise.templatePercentage ? getPercentageWeight(tmLookup, exercise.templatePercentage) : null;
+        filled.weight = prevSetInExercise?.weight || (pctWeight ? String(pctWeight) : '') || prevSessionSet?.weight || '';
+      }
+      if (!filled.reps) {
+        filled.reps = prevSetInExercise?.reps || parseTargetReps(exercise.templateReps) || prevSessionSet?.reps || '';
+      }
+    }
+    return filled;
+  };
+
+  // Toggles a set's completed flag. Completing a set prefills empty fields, auto-starts the rest
+  // timer (using the exercise's template rest if it parses, else the user's default duration),
+  // and — once every set in the card is done — auto-advances the accordion to the next exercise
+  // that still has incomplete sets (unless the user is mid-typing in a field).
+  const toggleSetCompleted = (exIdx, setIdx) => {
+    const newExercises = [...exercises];
+    const exercise = { ...newExercises[exIdx], sets: [...newExercises[exIdx].sets] };
+    const set = exercise.sets[setIdx];
+    const nowCompleting = !set.completed;
+
+    if (nowCompleting) {
+      const previousSession = getPreviousSession(exercise.name);
+      exercise.sets[setIdx] = { ...prefillSetOnComplete(exercise, setIdx, previousSession), completed: true };
+    } else {
+      exercise.sets[setIdx] = { ...set, completed: false };
+    }
+    newExercises[exIdx] = exercise;
+    setExercises(newExercises);
+
+    if (nowCompleting) {
+      const restSeconds = parseRestSeconds(exercise.templateRest) || restDuration;
+      startRestTimer(exIdx, exercise.name, restSeconds);
+
+      const cardFullyDone = exercise.sets.every(s => s.completed);
+      const isTyping = document.activeElement && document.activeElement.tagName === 'INPUT';
+      if (cardFullyDone && !isTyping) {
+        const nextIdx = newExercises.findIndex((ex, i) => i > exIdx && ex.sets.some(s => !s.completed));
+        if (nextIdx !== -1) setExpandedExIdx(nextIdx);
+      }
+    }
   };
 
   return (
@@ -3100,106 +3510,7 @@ const WorkoutTracker = () => {
                 return (
                   <div
                     key={day}
-                    onClick={() => {
-                      setSelectedDay(day);
-                      const existingLog = workoutLogs[logKey];
-
-                      if (existingLog) {
-                        setLogDate(existingLog.date);
-
-                        setExercises(existingLog.exercises);
-                        setPrefilled(false);
-                      } else {
-                        setLogDate(new Date().toISOString().split('T')[0]);
-
-                        // Auto-populate from previous week's same day
-                        const prevWeekKey = currentWeek > 1
-                          ? `block${currentBlock}-week${currentWeek - 1}-${day}`
-                          : null;
-                        const prevWeekLog = prevWeekKey ? workoutLogs[prevWeekKey] : null;
-
-                        if (prevWeekLog && prevWeekLog.exercises && prevWeekLog.exercises.length > 0) {
-                          const templateExercises = workout?.exercises || [];
-                          setExercises(prevWeekLog.exercises.map(ex => {
-                            const exType = ex.type || 'strength';
-                            const tmplEx = templateExercises.find(t => t.name === ex.name);
-
-                            // If template has a weekly progression for this week, use it to set weight
-                            const weekOverride = tmplEx?.weeklyProgression?.find(w => w.week === currentWeek) ?? null;
-                            const effectivePct  = weekOverride?.percentage ?? null;
-                            const effectiveSets = weekOverride?.sets ?? null;
-                            const effectiveReps = weekOverride?.reps ?? null;
-
-                            const tmLookup = tmplEx?.tmLink || ex.name;
-                            const pctWeight = (effectivePct && exType === 'strength')
-                              ? getPercentageWeight(tmLookup, effectivePct)
-                              : null;
-                            const targetReps = effectiveReps ? parseTargetReps(effectiveReps) : null;
-
-                            return {
-                              name: ex.name,
-                              type: exType,
-                              technique: ex.technique,
-                              templateTarget: (effectiveSets && effectiveReps)
-                                ? `${effectiveSets}×${effectiveReps}`
-                                : (tmplEx ? `${tmplEx.sets}×${tmplEx.reps}` : null),
-                              templatePercentage: effectivePct || tmplEx?.percentage || null,
-                              templateReps: effectiveReps || tmplEx?.reps || null,
-                              tmLink: tmplEx?.tmLink || null,
-                              sets: ex.sets.map(s =>
-                                exType === 'bodyweight'
-                                  ? { reps: s.reps || '', holdTime: s.holdTime || '' }
-                                  : exType === 'cardio'
-                                    ? { distance: s.distance || '', time: s.time || '', unit: s.unit || 'miles' }
-                                    : exType === 'tabata'
-                                      ? { rounds: s.rounds || '', workSeconds: s.workSeconds || '20', restSeconds: s.restSeconds || '10', calories: s.calories || '' }
-                                      : {
-                                          weight: pctWeight ? String(pctWeight) : (s.weight || ''),
-                                          reps: targetReps || s.reps || '',
-                                          ...(pctWeight ? { weightSource: 'tm-pct' } : {})
-                                        }
-                              ),
-                              notes: ex.notes || ''
-                            };
-                          }));
-                          setPrefilled(true);
-                        } else {
-                          setExercises(workout?.exercises.map(ex => {
-                            const exType = ex.type || 'strength';
-
-                            // Apply weekly progression override if one exists for currentWeek
-                            const weekOverride = ex.weeklyProgression?.find(w => w.week === currentWeek) ?? null;
-                            const effectivePct  = weekOverride?.percentage  ?? ex.percentage;
-                            const effectiveSets = weekOverride?.sets        ?? ex.sets;
-                            const effectiveReps = weekOverride?.reps        ?? ex.reps;
-
-                            // Auto-fill weight from % of TM (use tmLink if set)
-                            const tmLookup = ex.tmLink || ex.name;
-                            const pctWeight = (effectivePct && exType === 'strength')
-                              ? getPercentageWeight(tmLookup, effectivePct)
-                              : null;
-                            const targetReps = parseTargetReps(effectiveReps);
-                            return {
-                              name: ex.name,
-                              type: exType,
-                              technique: ex.technique,
-                              templateTarget: (effectiveSets && effectiveReps) ? `${effectiveSets}×${effectiveReps}` : null,
-                              templatePercentage: effectivePct || null,
-                              templateReps: effectiveReps || null,
-                              tmLink: ex.tmLink || null,
-                              sets: Array(parseInt(effectiveSets) || 3).fill(null).map(() => ({
-                                weight: pctWeight ? String(pctWeight) : '',
-                                reps: targetReps,
-                                weightSource: pctWeight ? 'tm-pct' : 'manual'
-                              })),
-                              notes: ''
-                            };
-                          }) || []);
-                          setPrefilled(false);
-                        }
-                      }
-                      setView('log');
-                    }}
+                    onClick={() => loadDayIntoLogView(day)}
                     className={`p-4 rounded-lg border transition-all ${
                       log
                         ? 'border-emerald-500 bg-emerald-950/30 hover:bg-emerald-950/50 cursor-pointer'
@@ -3258,12 +3569,42 @@ const WorkoutTracker = () => {
                 </p>
               </div>
               <button
-                onClick={() => { setPrefilled(false); setView('calendar'); }}
+                onClick={() => {
+                  const isDirty = openedSnapshotRef.current !== null && JSON.stringify({ exercises, logDate }) !== openedSnapshotRef.current;
+                  if (isDirty) {
+                    setShowExitConfirm(true);
+                  } else {
+                    setPrefilled(false);
+                    setView('calendar');
+                  }
+                }}
                 className="p-2 rounded-lg hover:bg-gray-700 text-gray-300"
+                title={openedSnapshotRef.current !== null ? 'Close (draft autosaves)' : 'Close'}
               >
                 <X className="w-5 h-5" />
               </button>
             </div>
+
+            {draftBanner && (
+              <div className="flex items-center justify-between p-3 bg-blue-950/30 border border-blue-800/50 rounded-lg flex-wrap gap-2">
+                <div className="flex items-center gap-2">
+                  <History className="w-4 h-4 text-blue-400" />
+                  <span className="text-sm text-blue-300">Restored unsaved draft from {timeAgo(draftBanner.savedAt)}</span>
+                </div>
+                <button
+                  onClick={() => {
+                    deleteDraft(currentLogKey);
+                    setDraftBanner(null);
+                    setDraftSavedAt(null);
+                    loadDayIntoLogView(selectedDay, { skipDraft: true });
+                  }}
+                  className="text-xs text-blue-400 hover:text-blue-300 underline shrink-0"
+                  title="Discard the draft and reload from the template"
+                >
+                  Start fresh
+                </button>
+              </div>
+            )}
 
             <div className="bg-gray-800 p-4 rounded-lg border border-gray-700">
               <h3 className="text-sm font-medium text-gray-300 mb-3">Session Info</h3>
@@ -3303,6 +3644,7 @@ const WorkoutTracker = () => {
                         templateTarget: (ex.sets && ex.reps) ? `${ex.sets}×${ex.reps}` : null,
                         templatePercentage: ex.percentage || null,
                         templateReps: ex.reps || null,
+                        templateRest: ex.rest || null,
                         tmLink: ex.tmLink || null,
                         sets: Array(parseInt(ex.sets) || 3).fill(null).map(() => ({
                           weight: pctWeight ? String(pctWeight) : '',
@@ -3346,6 +3688,7 @@ const WorkoutTracker = () => {
                             templateTarget: tmplEx ? `${tmplEx.sets}×${tmplEx.reps}` : null,
                             templatePercentage: tmplEx?.percentage || null,
                             templateReps: tmplEx?.reps || null,
+                            templateRest: tmplEx?.rest || null,
                             tmLink: tmplEx?.tmLink || null,
                             sets: ex.sets.map(s =>
                               exType === 'bodyweight'
@@ -3383,7 +3726,7 @@ const WorkoutTracker = () => {
 
                 const isExpanded = expandedExIdx === exIdx;
                 const exType = exercise.type || 'strength';
-                const filledCount = countFilledSets(exercise.sets, exType);
+                const completedCount = exercise.sets.filter(s => s.completed).length;
 
                 return (
                   <div
@@ -3448,7 +3791,7 @@ const WorkoutTracker = () => {
                           <span className="text-xs text-gray-500 shrink-0 hidden sm:inline">{exercise.templateTarget}</span>
                         )}
                         {exercise.sets.length > 0 && (
-                          <span className="text-xs text-gray-500 shrink-0 ml-auto">{filledCount}/{exercise.sets.length}</span>
+                          <span className="text-xs text-gray-500 shrink-0 ml-auto">{completedCount}/{exercise.sets.length}</span>
                         )}
                         <ChevronDown className={`w-4 h-4 text-gray-500 shrink-0 transition-transform ${isExpanded ? 'rotate-180' : ''}`} />
                       </button>
@@ -3721,9 +4064,16 @@ const WorkoutTracker = () => {
                         if (exerciseType === 'cardio') {
                           // Cardio input fields
                           return (
-                            <div key={setIdx} className="space-y-1">
-                              <div className="grid grid-cols-[2.25rem_1fr_3.25rem_5rem_2rem] gap-2 items-center">
-                                <span className="w-9 h-9 rounded-full bg-gray-700 text-gray-300 text-sm font-medium flex items-center justify-center justify-self-center">{setIdx + 1}</span>
+                            <div key={setIdx} className={`space-y-1 ${set.completed ? 'border-l-2 border-emerald-500 pl-1.5 -ml-1.5' : ''}`}>
+                              <div className={`grid grid-cols-[2.25rem_1fr_3.25rem_5rem_2rem] gap-2 items-center ${set.completed ? 'opacity-60' : ''}`}>
+                                <button
+                                  type="button"
+                                  onClick={() => toggleSetCompleted(exIdx, setIdx)}
+                                  className={`w-9 h-9 rounded-full flex items-center justify-center justify-self-center text-sm font-medium transition-colors ${set.completed ? 'bg-emerald-600 text-white' : 'bg-gray-700 text-gray-300 hover:bg-gray-600'}`}
+                                  title={set.completed ? 'Mark set incomplete' : 'Mark set complete'}
+                                >
+                                  {set.completed ? <Check className="w-4 h-4" /> : setIdx + 1}
+                                </button>
                                 <NumberField
                                   value={set.distance || ''}
                                   onChange={(v) => {
@@ -3787,8 +4137,15 @@ const WorkoutTracker = () => {
 
                         if (exerciseType === 'bodyweight') {
                           return (
-                            <div key={setIdx} className="grid grid-cols-[2.25rem_1fr_1fr_2rem] gap-2 items-center">
-                              <span className="w-9 h-9 rounded-full bg-gray-700 text-gray-300 text-sm font-medium flex items-center justify-center justify-self-center">{setIdx + 1}</span>
+                            <div key={setIdx} className={`grid grid-cols-[2.25rem_1fr_1fr_2rem] gap-2 items-center ${set.completed ? 'opacity-60 border-l-2 border-emerald-500 pl-1.5 -ml-1.5' : ''}`}>
+                              <button
+                                type="button"
+                                onClick={() => toggleSetCompleted(exIdx, setIdx)}
+                                className={`w-9 h-9 rounded-full flex items-center justify-center justify-self-center text-sm font-medium transition-colors ${set.completed ? 'bg-emerald-600 text-white' : 'bg-gray-700 text-gray-300 hover:bg-gray-600'}`}
+                                title={set.completed ? 'Mark set incomplete' : 'Mark set complete'}
+                              >
+                                {set.completed ? <Check className="w-4 h-4" /> : setIdx + 1}
+                              </button>
                               <NumberField
                                 value={set.reps || ''}
                                 onChange={(v) => {
@@ -3834,9 +4191,16 @@ const WorkoutTracker = () => {
                             ? (parseInt(set.rounds) * (parseInt(set.workSeconds || 20) + parseInt(set.restSeconds || 10)) - parseInt(set.restSeconds || 10))
                             : null;
                           return (
-                            <div key={setIdx} className="space-y-1.5 p-2 rounded-lg bg-gray-750/50 border border-gray-700">
-                              <div className="grid grid-cols-[2.25rem_1fr_2rem] gap-2 items-center">
-                                <span className="w-9 h-9 rounded-full bg-gray-700 text-gray-300 text-sm font-medium flex items-center justify-center justify-self-center">{setIdx + 1}</span>
+                            <div key={setIdx} className={`space-y-1.5 p-2 rounded-lg bg-gray-750/50 border ${set.completed ? 'border-emerald-600/50' : 'border-gray-700'}`}>
+                              <div className={`grid grid-cols-[2.25rem_1fr_2rem] gap-2 items-center ${set.completed ? 'opacity-60' : ''}`}>
+                                <button
+                                  type="button"
+                                  onClick={() => toggleSetCompleted(exIdx, setIdx)}
+                                  className={`w-9 h-9 rounded-full flex items-center justify-center justify-self-center text-sm font-medium transition-colors ${set.completed ? 'bg-emerald-600 text-white' : 'bg-gray-700 text-gray-300 hover:bg-gray-600'}`}
+                                  title={set.completed ? 'Mark set incomplete' : 'Mark set complete'}
+                                >
+                                  {set.completed ? <Check className="w-4 h-4" /> : setIdx + 1}
+                                </button>
                                 <NumberField
                                   value={set.rounds || ''}
                                   onChange={(v) => {
@@ -3919,9 +4283,16 @@ const WorkoutTracker = () => {
                         const hasSubline = pctOfTM || comparison === 'improved' || comparison === 'matched';
 
                         return (
-                          <div key={setIdx} className="space-y-0.5">
-                            <div className="grid grid-cols-[2.25rem_1fr_1fr_2rem] gap-2 items-center">
-                              <span className="w-9 h-9 rounded-full bg-gray-700 text-gray-300 text-sm font-medium flex items-center justify-center justify-self-center">{setIdx + 1}</span>
+                          <div key={setIdx} className={`space-y-0.5 ${set.completed ? 'border-l-2 border-emerald-500 pl-1.5 -ml-1.5' : ''}`}>
+                            <div className={`grid grid-cols-[2.25rem_1fr_1fr_2rem] gap-2 items-center ${set.completed ? 'opacity-60' : ''}`}>
+                              <button
+                                type="button"
+                                onClick={() => toggleSetCompleted(exIdx, setIdx)}
+                                className={`w-9 h-9 rounded-full flex items-center justify-center justify-self-center text-sm font-medium transition-colors ${set.completed ? 'bg-emerald-600 text-white' : 'bg-gray-700 text-gray-300 hover:bg-gray-600'}`}
+                                title={set.completed ? 'Mark set incomplete' : 'Mark set complete'}
+                              >
+                                {set.completed ? <Check className="w-4 h-4" /> : setIdx + 1}
+                              </button>
                               <NumberField
                                 value={set.weight || ''}
                                 onChange={(v) => {
@@ -4019,76 +4390,6 @@ const WorkoutTracker = () => {
                         <Plus className="w-4 h-4" />
                         Add {(exercise.type || 'strength') === 'cardio' ? 'Entry' : 'Set'}
                       </button>
-                    </div>
-
-                    {/* Rest Timer */}
-                    <div className="mt-3">
-                      {restTimer?.exIdx === exIdx ? (
-                        <div className={`flex items-center justify-between gap-2 flex-wrap p-3 rounded-lg border ${restTimer.remaining === 0 ? 'timer-warning border-red-700/50' : 'bg-gray-750 border-gray-600'}`}>
-                          <div className="flex items-center gap-2">
-                            <span
-                              className={`text-2xl font-mono font-bold tabular-nums ${restTimer.remaining === 0 ? 'text-red-400' : restTimer.remaining <= 10 ? 'text-red-400 animate-timer-pulse' : 'text-emerald-400'}`}
-                            >
-                              {formatSecondsToTime(restTimer.remaining)}
-                            </span>
-                            <span className="text-xs text-gray-400">rest</span>
-                          </div>
-                          <div className="flex items-center gap-2 flex-wrap">
-                            <button
-                              onClick={() => adjustRestTimer(-15)}
-                              className="px-2 py-1 bg-gray-700 hover:bg-gray-600 text-gray-300 text-xs rounded-lg"
-                              title="Subtract 15 seconds"
-                            >
-                              -15s
-                            </button>
-                            <button
-                              onClick={() => adjustRestTimer(15)}
-                              className="px-2 py-1 bg-gray-700 hover:bg-gray-600 text-gray-300 text-xs rounded-lg"
-                              title="Add 15 seconds"
-                            >
-                              +15s
-                            </button>
-                            <button
-                              onClick={pauseResumeRestTimer}
-                              className="px-3 py-1 bg-emerald-700 hover:bg-emerald-600 text-white text-xs rounded-lg font-medium"
-                            >
-                              {restTimer.running ? 'Pause' : 'Resume'}
-                            </button>
-                            <button
-                              onClick={stopRestTimer}
-                              className="p-1.5 hover:bg-red-600/20 text-red-400 rounded-lg transition-colors"
-                              title="Stop rest timer"
-                            >
-                              <X className="w-4 h-4" />
-                            </button>
-                          </div>
-                        </div>
-                      ) : (
-                        <div className="flex items-center gap-2 flex-wrap">
-                          <button
-                            onClick={() => startRestTimer(exIdx)}
-                            className="flex items-center gap-2 px-3 py-1.5 bg-gray-700 hover:bg-gray-600 text-gray-300 text-sm rounded-lg transition-colors"
-                            title={`Start ${restDuration}s rest timer`}
-                          >
-                            <Timer className="w-4 h-4" />
-                            Start Rest ({restDuration}s)
-                          </button>
-                          <button
-                            onClick={() => adjustRestDuration(-15)}
-                            className="px-2 py-1.5 bg-gray-700 hover:bg-gray-600 text-gray-300 text-xs rounded-lg"
-                            title="Decrease default rest duration"
-                          >
-                            -15s
-                          </button>
-                          <button
-                            onClick={() => adjustRestDuration(15)}
-                            className="px-2 py-1.5 bg-gray-700 hover:bg-gray-600 text-gray-300 text-xs rounded-lg"
-                            title="Increase default rest duration"
-                          >
-                            +15s
-                          </button>
-                        </div>
-                      )}
                     </div>
 
                     {/* Summary Display - Conditional based on type */}
@@ -4274,9 +4575,102 @@ const WorkoutTracker = () => {
               </button>
             </div>
 
-            {/* Sticky action bar — keeps Save reachable without hunting past a long exercise list.
-                Left slot is reserved for the draft-saved / set-progress status added in later PRs. */}
+            {/* Global rest timer — one per session, survives which card is expanded, view changes,
+                backgrounding, and refresh (see restTimer effects above). */}
+            {restTimer ? (
+              <div className={`p-3 rounded-lg border flex items-center justify-between gap-2 flex-wrap ${restRemainingMs === 0 ? 'timer-warning border-red-700/50' : 'bg-gray-800 border-gray-700'}`}>
+                <div className="flex items-center gap-2 min-w-0">
+                  <span
+                    className={`text-2xl font-mono font-bold tabular-nums shrink-0 ${restRemainingMs === 0 ? 'text-red-400' : restRemainingSeconds <= 10 ? 'text-red-400 animate-timer-pulse' : 'text-emerald-400'}`}
+                  >
+                    {formatSecondsToTime(restRemainingSeconds)}
+                  </span>
+                  <span className="text-xs text-gray-400 truncate">rest &middot; {restTimer.exName}</span>
+                </div>
+                <div className="flex items-center gap-2 flex-wrap">
+                  <button
+                    onClick={() => adjustRestTimer(-15)}
+                    className="px-2 py-1 bg-gray-700 hover:bg-gray-600 text-gray-300 text-xs rounded-lg"
+                    title="Subtract 15 seconds"
+                  >
+                    -15s
+                  </button>
+                  <button
+                    onClick={() => adjustRestTimer(15)}
+                    className="px-2 py-1 bg-gray-700 hover:bg-gray-600 text-gray-300 text-xs rounded-lg"
+                    title="Add 15 seconds"
+                  >
+                    +15s
+                  </button>
+                  <button
+                    onClick={pauseResumeRestTimer}
+                    className="px-3 py-1 bg-emerald-700 hover:bg-emerald-600 text-white text-xs rounded-lg font-medium"
+                  >
+                    {restTimer.running ? 'Pause' : 'Resume'}
+                  </button>
+                  <button
+                    onClick={() => setRestMuted(m => !m)}
+                    className="p-1.5 hover:bg-gray-700 text-gray-400 rounded-lg transition-colors"
+                    title={restMuted ? 'Unmute rest timer sound' : 'Mute rest timer sound'}
+                  >
+                    {restMuted ? <VolumeX className="w-4 h-4" /> : <Volume2 className="w-4 h-4" />}
+                  </button>
+                  <button
+                    onClick={stopRestTimer}
+                    className="p-1.5 hover:bg-red-600/20 text-red-400 rounded-lg transition-colors"
+                    title="Stop rest timer"
+                  >
+                    <X className="w-4 h-4" />
+                  </button>
+                </div>
+              </div>
+            ) : (
+              expandedExIdx != null && exercises[expandedExIdx] && (
+                <div className="flex items-center gap-2 flex-wrap">
+                  <button
+                    onClick={() => startRestTimer(
+                      expandedExIdx,
+                      exercises[expandedExIdx].name,
+                      parseRestSeconds(exercises[expandedExIdx].templateRest) || restDuration
+                    )}
+                    className="flex items-center gap-2 px-3 py-1.5 bg-gray-700 hover:bg-gray-600 text-gray-300 text-sm rounded-lg transition-colors"
+                    title={`Start ${restDuration}s rest timer`}
+                  >
+                    <Timer className="w-4 h-4" />
+                    Start Rest ({restDuration}s)
+                  </button>
+                  <button
+                    onClick={() => adjustRestDuration(-15)}
+                    className="px-2 py-1.5 bg-gray-700 hover:bg-gray-600 text-gray-300 text-xs rounded-lg"
+                    title="Decrease default rest duration"
+                  >
+                    -15s
+                  </button>
+                  <button
+                    onClick={() => adjustRestDuration(15)}
+                    className="px-2 py-1.5 bg-gray-700 hover:bg-gray-600 text-gray-300 text-xs rounded-lg"
+                    title="Increase default rest duration"
+                  >
+                    +15s
+                  </button>
+                </div>
+              )
+            )}
+
+            {/* Sticky action bar — keeps Save reachable without hunting past a long exercise list. */}
             <div className="sticky bottom-0 -mx-4 md:-mx-6 px-4 md:px-6 py-3 bg-gray-900/95 backdrop-blur border-t border-gray-700 flex items-center gap-3" style={{ paddingBottom: 'calc(0.75rem + env(safe-area-inset-bottom))' }}>
+            <div className="flex flex-col text-[10px] sm:text-xs text-gray-500 shrink-0 min-w-0 leading-tight">
+              <span>
+                {(() => {
+                  const totalSets = exercises.reduce((sum, ex) => sum + ex.sets.length, 0);
+                  const doneSets = exercises.reduce((sum, ex) => sum + ex.sets.filter(s => s.completed).length, 0);
+                  return totalSets > 0 ? `${doneSets}/${totalSets} sets` : null;
+                })()}
+              </span>
+              <span className="truncate max-w-[7rem] sm:max-w-none">
+                {draftSaving ? 'Saving…' : draftSavedAt ? `Saved ${timeAgo(draftSavedAt)}` : ''}
+              </span>
+            </div>
             <button
               onClick={() => {
                 const logKey = `block${currentBlock}-week${currentWeek}-${selectedDay}`;
@@ -4294,7 +4688,7 @@ const WorkoutTracker = () => {
                 });
 
                 // Save workout log — strip UI-only metadata before persisting
-                const exercisesToSave = exercises.map(({ _notesOpen, templateTarget, templatePercentage, pendingTypeChange, templateReps, ...ex }) => ({
+                const exercisesToSave = exercises.map(({ _notesOpen, templateTarget, templatePercentage, pendingTypeChange, templateReps, templateRest, ...ex }) => ({
                   ...ex,
                   sets: ex.sets.map(({ weightSource, ...set }) => set)
                 }));
@@ -4306,6 +4700,11 @@ const WorkoutTracker = () => {
                     prsHit: allPRs.length
                   }
                 });
+
+                // The workout is committed — the draft and any running rest timer no longer apply
+                deleteDraft(logKey);
+                setDraftSavedAt(null);
+                stopRestTimer();
 
                 // Build training-max suggestions from what was just logged (applied only on user confirm)
                 const suggestions = buildTMSuggestions(exercises);
@@ -4332,6 +4731,49 @@ const WorkoutTracker = () => {
           </div>
         )}
       </div>
+
+      {/* Exit-guard modal — shown from the log view's X when there are unsaved edits */}
+      {showExitConfirm && (
+        <div className="fixed inset-0 bg-black/80 flex items-center justify-center z-50 p-6">
+          <div className="bg-gray-800 rounded-lg border border-gray-700 p-6 max-w-sm w-full">
+            <ModalHeader title="Unsaved changes" onClose={() => setShowExitConfirm(false)} />
+            <p className="text-sm text-gray-300 mb-5">
+              You have edits that haven't been saved as a workout yet. Your draft is autosaved, so it's safe to leave — but Save Workout is what actually logs it for PRs and progress.
+            </p>
+            <div className="flex flex-col gap-2">
+              <button
+                onClick={() => setShowExitConfirm(false)}
+                className="w-full py-2.5 px-4 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg font-medium"
+              >
+                Stay and Save Workout
+              </button>
+              <button
+                onClick={() => {
+                  setShowExitConfirm(false);
+                  setPrefilled(false);
+                  setView('calendar');
+                }}
+                className="w-full py-2.5 px-4 bg-gray-700 hover:bg-gray-600 text-gray-200 rounded-lg font-medium"
+                title="The draft stays saved — you can reopen this day to pick up where you left off"
+              >
+                Leave (keep draft)
+              </button>
+              <button
+                onClick={() => {
+                  if (currentLogKey) deleteDraft(currentLogKey);
+                  setDraftSavedAt(null);
+                  setShowExitConfirm(false);
+                  setPrefilled(false);
+                  setView('calendar');
+                }}
+                className="w-full py-2.5 px-4 bg-red-600/20 hover:bg-red-600/30 text-red-400 rounded-lg font-medium"
+              >
+                Discard draft
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Personal Records Modal */}
       {showPRModal && newPRs.length > 0 && (
