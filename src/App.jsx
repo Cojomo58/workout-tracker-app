@@ -6,6 +6,10 @@ import { supabase } from './supabaseClient';
 
 const DEFAULT_TM_PERCENT = 90;
 
+// All days the Calendar/Template can show, and their display labels.
+const ALL_DAYS = ['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday'];
+const DAY_LABELS = { monday: 'Monday', tuesday: 'Tuesday', wednesday: 'Wednesday', thursday: 'Thursday', friday: 'Friday', saturday: 'Saturday', sunday: 'Sunday' };
+
 // --- Exercise-name normalization & similarity (for duplicate detection) ---
 // Common gym abbreviations expanded so "DB Bench Press" matches "Dumbbell Bench Press".
 const EXERCISE_ABBREV = {
@@ -86,7 +90,7 @@ function ModalHeader({ title, onClose }) {
 }
 
 // A blank starting block — every new install (and every reset) begins here, not with any
-// specific person's programming. `template` keys must stay in sync with `days` below.
+// specific person's programming. `template` keys must stay a subset of `ALL_DAYS` above.
 const createEmptyBlock = () => ({
   id: 1,
   name: 'My Training Block',
@@ -595,12 +599,22 @@ const WorkoutTracker = () => {
       setWorkoutLogs(parsedLogs);
       if (savedBlocks) setBlocks(JSON.parse(savedBlocks));
 
-      const parsedBlock = savedCurrentBlock ? parseInt(savedCurrentBlock) || 1 : 1;
+      const parsedBlockMetadata = savedBlockMetadata ? JSON.parse(savedBlockMetadata) : null;
+
+      // Clamp the restored block forward to the highest block with any data — if the user was
+      // browsing history when they closed the app, don't reopen there, reopen on the live cycle.
+      const fromLogs = Object.keys(parsedLogs)
+        .map(k => parseInt(k.match(/^block(\d+)-/)?.[1])).filter(Boolean);
+      const fromMeta = parsedBlockMetadata ? Object.keys(parsedBlockMetadata).map(Number).filter(Boolean) : [];
+      const highestBlock = Math.max(1, ...fromLogs, ...fromMeta);
+
+      const storedBlock = savedCurrentBlock ? parseInt(savedCurrentBlock) || 1 : 1;
+      const parsedBlock = Math.max(storedBlock, highestBlock);
       setCurrentBlock(parsedBlock);
       setCurrentWeek(getLastPopulatedWeek(parsedBlock, parsedLogs));
 
-      if (savedBlockMetadata) {
-        setBlockMetadata(JSON.parse(savedBlockMetadata));
+      if (parsedBlockMetadata) {
+        setBlockMetadata(parsedBlockMetadata);
       } else {
         // Seed block 1 metadata — infer start date from earliest log if possible
         const block1Dates = Object.entries(parsedLogs)
@@ -1730,7 +1744,7 @@ const WorkoutTracker = () => {
   };
 
   const handleSetWeek1AsTemplate = () => {
-    const allDays = ['monday','tuesday','wednesday','thursday','friday','saturday','sunday'];
+    const allDays = ALL_DAYS;
     const hasData = allDays.some(day =>
       workoutLogs[`block${currentBlock}-week1-${day}`]?.exercises?.length > 0
     );
@@ -1805,8 +1819,11 @@ const WorkoutTracker = () => {
     localStorage.removeItem('training-maxes');
   };
 
-  const days = ['monday', 'tuesday', 'wednesday', 'thursday', 'friday'];
-  const dayNames = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday'];
+  // Days shown on the Calendar: any day defined in the template, or that has a log this week
+  // (so a Saturday/Sunday workout — buildable in the Template editor — is reachable here too).
+  const visibleDays = useMemo(() => ALL_DAYS.filter(d =>
+    blocks[0]?.template?.[d] || workoutLogs[`block${currentBlock}-week${currentWeek}-${d}`]
+  ), [blocks, workoutLogs, currentBlock, currentWeek]);
 
   const getCurrentTemplate = () => {
     return blocks[0]?.template || {};
@@ -2056,6 +2073,18 @@ const WorkoutTracker = () => {
       .filter(Boolean);
     return weeks.length > 0 ? Math.max(...weeks) : 1;
   };
+
+  // Highest block number with any data (logs or metadata) — drives block-nav caps and
+  // read-only-history behavior. `currentBlock` is the block currently being viewed, which
+  // may be less than this while browsing history.
+  const highestBlockWithData = useMemo(() => {
+    const fromLogs = Object.keys(workoutLogs)
+      .map(k => parseInt(k.match(/^block(\d+)-/)?.[1])).filter(Boolean);
+    const fromMeta = Object.keys(blockMetadata).map(Number).filter(Boolean);
+    return Math.max(1, ...fromLogs, ...fromMeta);
+  }, [workoutLogs, blockMetadata]);
+
+  const isViewingCurrentBlock = currentBlock === highestBlockWithData;
 
   const getPreviousSession = (exerciseName) => {
     const history = getAllExerciseHistory(exerciseName);
@@ -3245,7 +3274,7 @@ const WorkoutTracker = () => {
                     const newBlocks = [...blocks];
                     const template = newBlocks[0].template;
                     const existingDays = Object.keys(template);
-                    const allDays = ['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday'];
+                    const allDays = ALL_DAYS;
                     const availableDays = allDays.filter(d => !existingDays.includes(d));
                     if (availableDays.length > 0) {
                       template[availableDays[0]] = { name: 'New Workout', exercises: [] };
@@ -3260,7 +3289,7 @@ const WorkoutTracker = () => {
               </div>
 
               <div className="grid gap-3">
-                {['monday','tuesday','wednesday','thursday','friday','saturday','sunday']
+                {ALL_DAYS
                   .filter(d => blocks[0]?.template[d])
                   .map(dayKey => {
                     const dayData = blocks[0].template[dayKey];
@@ -3663,7 +3692,7 @@ const WorkoutTracker = () => {
               {/* Action buttons */}
               <div className="flex justify-end gap-2">
                 {(() => {
-                  const allDays = ['monday','tuesday','wednesday','thursday','friday','saturday','sunday'];
+                  const allDays = ALL_DAYS;
                   const week1HasData = allDays.some(day =>
                     workoutLogs[`block${currentBlock}-week1-${day}`]?.exercises?.length > 0
                   );
@@ -3681,7 +3710,7 @@ const WorkoutTracker = () => {
                 <button
                   onClick={() => {
                     if (!window.confirm("Start a new training cycle? You'll return to Week 1.")) return;
-                    const newBlockNum = currentBlock + 1;
+                    const newBlockNum = Math.max(currentBlock, highestBlockWithData) + 1;
                     const today = new Date().toISOString().split('T')[0];
                     setBlockMetadata({ ...blockMetadata, [newBlockNum]: { name: `Block ${newBlockNum}`, startDate: today } });
                     setCurrentBlock(newBlockNum);
@@ -3695,14 +3724,51 @@ const WorkoutTracker = () => {
                 </button>
               </div>
 
+              {!isViewingCurrentBlock && (
+                <div className="px-4 py-2 rounded-lg border border-amber-700/40 bg-amber-900/20 text-amber-300 text-sm">
+                  Viewing a past training cycle — read-only. You can look at logged workouts, but empty days can't be opened and new workouts can't be saved here.
+                </div>
+              )}
+
+              {/* Block navigation row */}
+              <div className="flex items-center justify-between">
+                <h3 className="text-sm font-semibold text-gray-400">
+                  {blockMetadata[currentBlock]?.name || `Training Cycle ${currentBlock}`}
+                </h3>
+                <div className="flex gap-2">
+                  <button
+                    onClick={() => {
+                      const newBlock = Math.max(1, currentBlock - 1);
+                      setCurrentBlock(newBlock);
+                      setCurrentWeek(getLastPopulatedWeek(newBlock, workoutLogs));
+                    }}
+                    className="p-2 rounded-lg hover:bg-gray-700 text-gray-300 disabled:opacity-50"
+                    disabled={currentBlock === 1}
+                    title="Previous block"
+                  >
+                    <ChevronLeft className="w-5 h-5" />
+                  </button>
+                  <span className="px-4 py-2 bg-gray-700 rounded-lg text-gray-300 font-medium">
+                    Block {currentBlock}
+                  </span>
+                  <button
+                    onClick={() => {
+                      const newBlock = Math.min(highestBlockWithData, currentBlock + 1);
+                      setCurrentBlock(newBlock);
+                      setCurrentWeek(getLastPopulatedWeek(newBlock, workoutLogs));
+                    }}
+                    disabled={currentBlock >= highestBlockWithData}
+                    className="p-2 rounded-lg hover:bg-gray-700 text-gray-300 disabled:opacity-30"
+                    title="Next block"
+                  >
+                    <ChevronRight className="w-5 h-5" />
+                  </button>
+                </div>
+              </div>
+
               {/* Week navigation row */}
               <div className="flex items-center justify-between">
-                <div>
-                  <h2 className="text-2xl font-bold text-gray-100">Current Block · Week {currentWeek}</h2>
-                  {blockMetadata[currentBlock]?.name && (
-                    <p className="text-sm text-gray-400 mt-0.5">{blockMetadata[currentBlock].name}</p>
-                  )}
-                </div>
+                <h2 className="text-2xl font-bold text-gray-100">Week {currentWeek}</h2>
                 <div className="flex gap-2">
                   <button
                     onClick={() => setCurrentWeek(Math.max(1, currentWeek - 1))}
@@ -3726,26 +3792,29 @@ const WorkoutTracker = () => {
             </div>
 
             <div className="grid gap-3">
-              {days.map((day, idx) => {
+              {visibleDays.map((day) => {
                 const template = getCurrentTemplate();
                 const workout = template[day];
                 const logKey = `block${currentBlock}-week${currentWeek}-${day}`;
                 const log = workoutLogs[logKey];
-                
+                const isClickable = isViewingCurrentBlock || !!log;
+
                 return (
                   <div
                     key={day}
-                    onClick={() => loadDayIntoLogView(day)}
+                    onClick={() => { if (isClickable) loadDayIntoLogView(day); }}
                     className={`p-4 rounded-lg border transition-all ${
                       log
                         ? 'border-emerald-500 bg-emerald-950/30 hover:bg-emerald-950/50 cursor-pointer'
-                        : 'border-gray-700 bg-gray-800 hover:bg-gray-750 hover:border-gray-600 cursor-pointer'
+                        : isClickable
+                          ? 'border-gray-700 bg-gray-800 hover:bg-gray-750 hover:border-gray-600 cursor-pointer'
+                          : 'border-gray-700 bg-gray-800'
                     }`}
                   >
                     <div className="flex items-center justify-between">
                       <div className="flex-1">
                         <div className="flex items-center gap-3 mb-1 flex-wrap">
-                          <h3 className="font-semibold text-gray-100">{dayNames[idx]}</h3>
+                          <h3 className="font-semibold text-gray-100">{DAY_LABELS[day]}</h3>
                           {log?.date && (
                             <span className="text-xs text-gray-400 bg-gray-700/50 px-2 py-1 rounded">
                               {formatDate(log.date)}
@@ -4896,62 +4965,64 @@ const WorkoutTracker = () => {
                 {draftSaving ? 'Saving…' : draftSavedAt ? `Saved ${timeAgo(draftSavedAt)}` : ''}
               </span>
             </div>
-            <button
-              onClick={() => {
-                const logKey = `block${currentBlock}-week${currentWeek}-${selectedDay}`;
-                const weekKey = `block${currentBlock}-week${currentWeek}`;
+            {isViewingCurrentBlock && (
+              <button
+                onClick={() => {
+                  const logKey = `block${currentBlock}-week${currentWeek}-${selectedDay}`;
+                  const weekKey = `block${currentBlock}-week${currentWeek}`;
 
-                // Check for PRs in all exercises
-                const allPRs = [];
-                exercises.forEach(exercise => {
-                  const exerciseType = exercise.type || 'strength';
-                  const prs = checkForPRs(exercise.name, exercise.sets, logDate, exerciseType);
-                  allPRs.push(...prs);
+                  // Check for PRs in all exercises
+                  const allPRs = [];
+                  exercises.forEach(exercise => {
+                    const exerciseType = exercise.type || 'strength';
+                    const prs = checkForPRs(exercise.name, exercise.sets, logDate, exerciseType);
+                    allPRs.push(...prs);
 
-                  // Update PRs in state
-                  updatePRs(exercise.name, exercise.sets, logDate, logKey, exerciseType);
-                });
+                    // Update PRs in state
+                    updatePRs(exercise.name, exercise.sets, logDate, logKey, exerciseType);
+                  });
 
-                // Save workout log — strip UI-only metadata before persisting
-                const exercisesToSave = exercises.map(({ _notesOpen, templateTarget, templatePercentage, pendingTypeChange, templateReps, templateRest, ...ex }) => ({
-                  ...ex,
-                  sets: ex.sets.map(({ weightSource, ...set }) => set)
-                }));
-                setWorkoutLogs({
-                  ...workoutLogs,
-                  [logKey]: {
-                    date: logDate,
-                    exercises: exercisesToSave,
-                    prsHit: allPRs.length
+                  // Save workout log — strip UI-only metadata before persisting
+                  const exercisesToSave = exercises.map(({ _notesOpen, templateTarget, templatePercentage, pendingTypeChange, templateReps, templateRest, ...ex }) => ({
+                    ...ex,
+                    sets: ex.sets.map(({ weightSource, ...set }) => set)
+                  }));
+                  setWorkoutLogs({
+                    ...workoutLogs,
+                    [logKey]: {
+                      date: logDate,
+                      exercises: exercisesToSave,
+                      prsHit: allPRs.length
+                    }
+                  });
+
+                  // The workout is committed — the draft and any running rest timer no longer apply
+                  deleteDraft(logKey);
+                  setDraftSavedAt(null);
+                  stopRestTimer();
+
+                  // Build training-max suggestions from what was just logged (applied only on user confirm)
+                  const suggestions = buildTMSuggestions(exercises);
+                  setTmSuggestions(suggestions);
+                  setTmSuggestSelected(suggestions.reduce((acc, _, i) => { acc[i] = true; return acc; }, {}));
+
+                  // Chain modals: PRs first, then TM suggestions, then back to calendar
+                  if (allPRs.length > 0) {
+                    setNewPRs(allPRs);
+                    setShowPRModal(true);
+                  } else if (suggestions.length > 0) {
+                    setShowTMSuggestModal(true);
+                  } else {
+                    setPrefilled(false);
+                    setView('calendar');
                   }
-                });
-
-                // The workout is committed — the draft and any running rest timer no longer apply
-                deleteDraft(logKey);
-                setDraftSavedAt(null);
-                stopRestTimer();
-
-                // Build training-max suggestions from what was just logged (applied only on user confirm)
-                const suggestions = buildTMSuggestions(exercises);
-                setTmSuggestions(suggestions);
-                setTmSuggestSelected(suggestions.reduce((acc, _, i) => { acc[i] = true; return acc; }, {}));
-
-                // Chain modals: PRs first, then TM suggestions, then back to calendar
-                if (allPRs.length > 0) {
-                  setNewPRs(allPRs);
-                  setShowPRModal(true);
-                } else if (suggestions.length > 0) {
-                  setShowTMSuggestModal(true);
-                } else {
-                  setPrefilled(false);
-                  setView('calendar');
-                }
-              }}
-              className="flex-1 bg-emerald-600 text-white py-3 rounded-lg font-medium hover:bg-emerald-700 flex items-center justify-center gap-2"
-            >
-              <Save className="w-5 h-5" />
-              Save Workout
-            </button>
+                }}
+                className="flex-1 bg-emerald-600 text-white py-3 rounded-lg font-medium hover:bg-emerald-700 flex items-center justify-center gap-2"
+              >
+                <Save className="w-5 h-5" />
+                Save Workout
+              </button>
+            )}
             </div>
           </div>
         )}
