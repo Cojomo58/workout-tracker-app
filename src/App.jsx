@@ -1,5 +1,5 @@
 import React, { useState, useMemo, useCallback, useRef } from 'react';
-import { Plus, Minus, ChevronLeft, ChevronRight, ChevronDown, ArrowUp, ArrowDown, TrendingUp, Calendar, Dumbbell, Save, X, History, Settings, Trash2, Edit3, Trophy, LogIn, LogOut, GripVertical, Timer, Check, Volume2, VolumeX } from 'lucide-react';
+import { Plus, Minus, ChevronLeft, ChevronRight, ChevronDown, ArrowUp, ArrowDown, TrendingUp, Calendar, Dumbbell, Save, X, History, Settings, Trash2, Edit3, Trophy, LogIn, LogOut, GripVertical, Timer, Check, Volume2, VolumeX, RefreshCw, Download, Upload } from 'lucide-react';
 import { LineChart, Line, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
 import Fuse from 'fuse.js';
 import { supabase } from './supabaseClient';
@@ -447,6 +447,34 @@ const WorkoutTracker = () => {
               migratedPRs[exerciseName].longestHold = { value: holdTime, date: log.date, logKey };
             }
           });
+        } else if (exerciseType === 'tabata') {
+          // Tabata PR migration
+          exercise.sets.forEach(set => {
+            const rounds = parseInt(set.rounds);
+
+            if (!rounds) return;
+
+            // Update most rounds
+            if (!migratedPRs[exerciseName].mostRounds || rounds > migratedPRs[exerciseName].mostRounds.value) {
+              migratedPRs[exerciseName].mostRounds = {
+                value: rounds,
+                workSeconds: set.workSeconds || 20,
+                restSeconds: set.restSeconds || 10,
+                date: log.date,
+                logKey
+              };
+            }
+          });
+
+          // Update most sets
+          const completedSets = exercise.sets.filter(s => parseInt(s.rounds) > 0).length;
+          if (completedSets > 0 && (!migratedPRs[exerciseName].mostSets || completedSets > migratedPRs[exerciseName].mostSets.value)) {
+            migratedPRs[exerciseName].mostSets = {
+              value: completedSets,
+              date: log.date,
+              logKey
+            };
+          }
         } else if (exerciseType === 'cardio') {
           // Cardio PR migration
           exercise.sets.forEach(set => {
@@ -514,9 +542,10 @@ const WorkoutTracker = () => {
               migratedPRs[exerciseName].maxVolume = { value: volume, date: log.date, logKey, weight, reps };
             }
 
-            // Update max reps (overall, not per weight)
-            if (!migratedPRs[exerciseName].maxReps || reps > migratedPRs[exerciseName].maxReps.value) {
-              migratedPRs[exerciseName].maxReps = { value: reps, weight, date: log.date, logKey };
+            // Update max reps at weight
+            const maxRepsKey = `maxRepsAt${roundToNearest2_5(weight)}`;
+            if (!migratedPRs[exerciseName][maxRepsKey] || reps > migratedPRs[exerciseName][maxRepsKey].reps) {
+              migratedPRs[exerciseName][maxRepsKey] = { reps, weight, date: log.date, logKey };
             }
 
             // Update estimated 1RM
@@ -585,11 +614,10 @@ const WorkoutTracker = () => {
         localStorage.setItem('block-metadata', JSON.stringify(seed));
       }
 
-      if (Object.keys(parsedLogs).length > 0) {
-        const migratedPRs = migrateHistoricalPRs(parsedLogs);
-        setPersonalRecords(migratedPRs);
-      } else if (savedPRs) {
+      if (savedPRs) {
         setPersonalRecords(JSON.parse(savedPRs));
+      } else if (Object.keys(parsedLogs).length > 0) {
+        setPersonalRecords(migrateHistoricalPRs(parsedLogs));
       }
 
       const savedTM = localStorage.getItem('training-maxes');
@@ -621,11 +649,10 @@ const WorkoutTracker = () => {
       setBlockMetadata({ 1: { name: 'Block 1', startDate } });
     }
 
-    if (Object.keys(parsedLogs).length > 0) {
-      const migratedPRs = migrateHistoricalPRs(parsedLogs);
-      setPersonalRecords(migratedPRs);
-    } else {
-      setPersonalRecords(data.personal_records || {});
+    if (data.personal_records && Object.keys(data.personal_records).length > 0) {
+      setPersonalRecords(data.personal_records);
+    } else if (Object.keys(parsedLogs).length > 0) {
+      setPersonalRecords(migrateHistoricalPRs(parsedLogs));
     }
 
     if (data.training_maxes && Object.keys(data.training_maxes).length > 0) {
@@ -1372,7 +1399,7 @@ const WorkoutTracker = () => {
       }
 
       // Check max reps at specific weight
-      const maxRepsKey = `maxRepsAt${Math.floor(weight)}`;
+      const maxRepsKey = `maxRepsAt${roundToNearest2_5(weight)}`;
       if (!currentPRs[maxRepsKey] || reps > currentPRs[maxRepsKey].reps) {
         prsDetected.push({
           type: 'maxReps',
@@ -1512,7 +1539,7 @@ const WorkoutTracker = () => {
         }
 
         // Update max reps at weight
-        const maxRepsKey = `maxRepsAt${Math.floor(weight)}`;
+        const maxRepsKey = `maxRepsAt${roundToNearest2_5(weight)}`;
         if (!updatedPRs[maxRepsKey] || reps > updatedPRs[maxRepsKey].reps) {
           updatedPRs[maxRepsKey] = { reps, weight, date: logDate, logKey };
         }
@@ -3023,6 +3050,25 @@ const WorkoutTracker = () => {
               </button>
               {manageExOpen && (
                 <div className="mt-3">
+                  {/* Manual PR rebuild — PRs are no longer auto-migrated on load, so give users an escape hatch after editing/deleting logs */}
+                  <div className="mb-4 flex items-center justify-between gap-3 p-3 bg-gray-900/40 rounded-lg border border-gray-700">
+                    <p className="text-xs text-gray-400">
+                      Rebuild all personal records from your workout logs. Use this after editing or deleting logged sets.
+                    </p>
+                    <button
+                      onClick={() => {
+                        if (window.confirm('Recalculate all personal records from your workout logs? This overwrites your current PRs with values rebuilt from history.')) {
+                          setPersonalRecords(migrateHistoricalPRs(workoutLogs));
+                        }
+                      }}
+                      className="shrink-0 flex items-center gap-1.5 text-xs px-3 py-2 bg-gray-700 hover:bg-gray-600 text-gray-200 rounded-lg border border-gray-600 font-medium"
+                      title="Recalculate PRs from logs"
+                    >
+                      <RefreshCw className="w-3.5 h-3.5" />
+                      Recalculate PRs from Logs
+                    </button>
+                  </div>
+
                   {/* Possible duplicates — clusters of similarly-named exercises that can be merged */}
                   {duplicateClusters.length > 0 && (
                     <div className="mb-4 p-3 bg-amber-900/20 border border-amber-700/40 rounded-lg">
@@ -3555,6 +3601,30 @@ const WorkoutTracker = () => {
 
             {/* Reset Template */}
             <div className="pt-4 border-t border-gray-700 flex flex-wrap gap-3">
+              <button
+                onClick={exportData}
+                className="flex items-center gap-2 px-4 py-2 bg-emerald-600/20 hover:bg-emerald-600/30 text-emerald-400 rounded-lg text-sm"
+                title="Download a JSON backup of all your data"
+              >
+                <Download className="w-4 h-4" />
+                Export Backup
+              </button>
+              <label
+                className="flex items-center gap-2 px-4 py-2 bg-gray-700 hover:bg-gray-600 text-gray-300 rounded-lg text-sm cursor-pointer"
+                title="Restore data from a previously exported JSON backup"
+              >
+                <Upload className="w-4 h-4" />
+                Import Backup
+                <input
+                  type="file"
+                  accept="application/json"
+                  className="hidden"
+                  onChange={(e) => {
+                    importData(e);
+                    e.target.value = '';
+                  }}
+                />
+              </label>
               <button
                 onClick={() => {
                   if (window.confirm('Reset template to default? This will clear all your custom workout days and exercises.')) {
