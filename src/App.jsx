@@ -65,6 +65,15 @@ const findSimilarExercise = (name, candidates, threshold = 0.6) => {
   return best;
 };
 
+// A set counts unless it's explicitly excluded. Warmups never count. Completion only filters
+// once the user has actually used it on this exercise — so older logs, where nothing was ever
+// marked complete, still count in full.
+const performedSets = (exercise) => {
+  const sets = exercise?.sets || [];
+  const anyCompleted = sets.some(s => s.completed);
+  return sets.filter(s => !s.warmup && (!anyCompleted || s.completed));
+};
+
 function ExerciseTypeBadge({ type }) {
   const styles = {
     cardio: 'bg-blue-900/50 text-blue-400',
@@ -433,13 +442,14 @@ const WorkoutTracker = () => {
 
         const exerciseName = exercise.name;
         const exerciseType = exercise.type || 'strength';
+        const psets = performedSets(exercise);
 
         if (!migratedPRs[exerciseName]) {
           migratedPRs[exerciseName] = {};
         }
 
         if (exerciseType === 'bodyweight') {
-          exercise.sets.forEach(set => {
+          psets.forEach(set => {
             const reps = parseInt(set.reps);
             const holdTime = parseInt(set.holdTime);
 
@@ -453,7 +463,7 @@ const WorkoutTracker = () => {
           });
         } else if (exerciseType === 'tabata') {
           // Tabata PR migration
-          exercise.sets.forEach(set => {
+          psets.forEach(set => {
             const rounds = parseInt(set.rounds);
 
             if (!rounds) return;
@@ -471,7 +481,7 @@ const WorkoutTracker = () => {
           });
 
           // Update most sets
-          const completedSets = exercise.sets.filter(s => parseInt(s.rounds) > 0).length;
+          const completedSets = psets.filter(s => parseInt(s.rounds) > 0).length;
           if (completedSets > 0 && (!migratedPRs[exerciseName].mostSets || completedSets > migratedPRs[exerciseName].mostSets.value)) {
             migratedPRs[exerciseName].mostSets = {
               value: completedSets,
@@ -481,7 +491,7 @@ const WorkoutTracker = () => {
           }
         } else if (exerciseType === 'cardio') {
           // Cardio PR migration
-          exercise.sets.forEach(set => {
+          psets.forEach(set => {
             const distance = parseFloat(set.distance);
             const timeSeconds = parseTimeToSeconds(set.time);
 
@@ -527,7 +537,7 @@ const WorkoutTracker = () => {
           });
         } else {
           // Strength PR migration
-          exercise.sets.forEach(set => {
+          psets.forEach(set => {
             const weight = parseFloat(set.weight);
             const reps = parseFloat(set.reps);
 
@@ -1580,15 +1590,16 @@ const WorkoutTracker = () => {
       .map(entry => {
         let value = 0;
         const exerciseType = entry.type || 'strength';
+        const pset = performedSets(entry);
 
         if (exerciseType === 'cardio') {
           // Cardio chart types
           if (type === 'distance') {
             // Total distance in session
-            value = calculateTotalDistance(entry.sets);
+            value = calculateTotalDistance(pset);
           } else if (type === 'pace') {
             // Best pace in session (lowest pace = fastest)
-            const paces = entry.sets
+            const paces = pset
               .map(s => {
                 const d = parseFloat(s.distance);
                 const t = parseTimeToSeconds(s.time);
@@ -1598,37 +1609,37 @@ const WorkoutTracker = () => {
             value = paces.length > 0 ? Math.min(...paces) : 0;
           } else if (type === 'duration') {
             // Total duration in session (in minutes for display)
-            value = calculateTotalDuration(entry.sets) / 60;
+            value = calculateTotalDuration(pset) / 60;
           }
         } else if (exerciseType === 'bodyweight') {
           if (type === 'reps') {
-            value = Math.max(...entry.sets.map(s => parseInt(s.reps) || 0));
+            value = Math.max(...pset.map(s => parseInt(s.reps) || 0));
           } else if (type === 'holdTime') {
-            value = Math.max(...entry.sets.map(s => parseInt(s.holdTime) || 0));
+            value = Math.max(...pset.map(s => parseInt(s.holdTime) || 0));
           }
         } else if (exerciseType === 'tabata') {
           // Tabata chart types
           if (type === 'rounds') {
             // Total rounds in session
-            value = entry.sets.reduce((sum, s) => sum + (parseInt(s.rounds) || 0), 0);
+            value = pset.reduce((sum, s) => sum + (parseInt(s.rounds) || 0), 0);
           } else if (type === 'sets') {
             // Number of sets completed
-            value = entry.sets.filter(s => parseInt(s.rounds) > 0).length;
+            value = pset.filter(s => parseInt(s.rounds) > 0).length;
           }
         } else {
           // Strength chart types
           if (type === 'e1rm') {
             // Best estimated 1RM (Epley) across the session's sets
-            value = Math.max(...entry.sets.map(s => calculateEstimated1RM(s.weight, s.reps)));
+            value = Math.max(...pset.map(s => calculateEstimated1RM(s.weight, s.reps)));
           } else if (type === 'weight') {
             // Max weight in the session
-            value = Math.max(...entry.sets.map(s => parseFloat(s.weight) || 0));
+            value = Math.max(...pset.map(s => parseFloat(s.weight) || 0));
           } else if (type === 'volume') {
             // Total volume for the session
-            value = calculateVolume(entry.sets);
+            value = calculateVolume(pset);
           } else if (type === 'reps') {
             // Max reps in the session
-            value = Math.max(...entry.sets.map(s => parseFloat(s.reps) || 0));
+            value = Math.max(...pset.map(s => parseFloat(s.reps) || 0));
           }
         }
 
@@ -1957,7 +1968,7 @@ const WorkoutTracker = () => {
       if ((ex.type || 'strength') !== 'strength' || !ex.name) return;
       // Best estimated 1RM across this exercise's sets.
       let best1RM = 0, bestWeight = 0, bestReps = 0;
-      (ex.sets || []).forEach(set => {
+      performedSets(ex).forEach(set => {
         const e1rm = calculateEstimated1RM(set.weight, set.reps);
         if (e1rm > best1RM) { best1RM = e1rm; bestWeight = parseFloat(set.weight); bestReps = parseFloat(set.reps); }
       });
@@ -2042,7 +2053,7 @@ const WorkoutTracker = () => {
     return Object.entries(workoutLogs)
       .filter(([k]) => k.startsWith(`block${blockNum}-`))
       .reduce((sum, [, log]) => sum + (log.exercises || []).reduce(
-        (s, ex) => s + (((ex.type || 'strength') === 'strength') ? calculateVolume(ex.sets) : 0), 0
+        (s, ex) => s + (((ex.type || 'strength') === 'strength') ? calculateVolume(performedSets(ex)) : 0), 0
       ), 0);
   };
 
@@ -2058,7 +2069,7 @@ const WorkoutTracker = () => {
       const m = key.match(new RegExp(`^block${blockNum}-week(\\d+)-`));
       if (!m || !log.exercises) return;
       const week = parseInt(m[1]);
-      const vol = log.exercises.reduce((s, ex) => s + (((ex.type || 'strength') === 'strength') ? calculateVolume(ex.sets) : 0), 0);
+      const vol = log.exercises.reduce((s, ex) => s + (((ex.type || 'strength') === 'strength') ? calculateVolume(performedSets(ex)) : 0), 0);
       weekTotals[week] = (weekTotals[week] || 0) + vol;
     });
     return Object.entries(weekTotals)
@@ -2876,7 +2887,7 @@ const WorkoutTracker = () => {
                   const history = getAllExerciseHistory(selectedExerciseHistory);
                   const exerciseType = history.length > 0 ? (history[0].type || 'strength') : 'strength';
                   const strengthHistory = exerciseType === 'strength'
-                    ? history.map(e => calculateVolume(e.sets)).filter(v => v > 0)
+                    ? history.map(e => calculateVolume(performedSets(e))).filter(v => v > 0)
                     : [];
                   const firstVol = strengthHistory.length > 0 ? strengthHistory[strengthHistory.length - 1] : null;
                   const bestVol = strengthHistory.length > 0 ? Math.max(...strengthHistory) : null;
@@ -4012,8 +4023,8 @@ const WorkoutTracker = () => {
             <div className="space-y-4">
               {exercises.map((exercise, exIdx) => {
                 const previousSession = getPreviousSession(exercise.name);
-                const currentVolume = calculateVolume(exercise.sets);
-                const previousVolume = previousSession ? calculateVolume(previousSession.sets) : 0;
+                const currentVolume = calculateVolume(performedSets(exercise));
+                const previousVolume = previousSession ? calculateVolume(performedSets(previousSession)) : 0;
                 const volumeChange = previousVolume > 0
                   ? ((currentVolume - previousVolume) / previousVolume * 100).toFixed(1)
                   : null;
@@ -4354,6 +4365,39 @@ const WorkoutTracker = () => {
                       {exercise.sets.map((set, setIdx) => {
                         const exerciseType = exercise.type || 'strength';
                         const comparison = exerciseType === 'strength' ? compareSetToPrevious(set, previousSession?.sets, setIdx) : null;
+                        // Warmup toggle + RPE picker — shared sub-line control for strength/bodyweight sets.
+                        const warmupRpeControls = (
+                          <div className="flex items-center gap-1.5">
+                            <button
+                              type="button"
+                              onClick={() => {
+                                const newExercises = [...exercises];
+                                newExercises[exIdx].sets[setIdx].warmup = !newExercises[exIdx].sets[setIdx].warmup;
+                                setExercises(newExercises);
+                              }}
+                              className={`text-[10px] font-semibold px-1.5 py-0.5 rounded transition-colors ${set.warmup ? 'text-amber-300 bg-amber-900/30' : 'text-gray-500 bg-gray-800 hover:bg-gray-700'}`}
+                              title="Mark as warmup set (excluded from volume and PRs)"
+                            >
+                              W
+                            </button>
+                            <select
+                              value={set.rpe || ''}
+                              onChange={(e) => {
+                                const newExercises = [...exercises];
+                                newExercises[exIdx].sets[setIdx].rpe = e.target.value;
+                                setExercises(newExercises);
+                              }}
+                              className={`text-[10px] rounded px-1 py-0.5 border-0 ${set.rpe ? 'text-purple-300 bg-purple-900/30' : 'text-gray-500 bg-gray-800'}`}
+                              title="RPE (rate of perceived exertion)"
+                              aria-label={`Set ${setIdx + 1} RPE`}
+                            >
+                              <option value=""></option>
+                              {['5', '5.5', '6', '6.5', '7', '7.5', '8', '8.5', '9', '9.5', '10'].map(v => (
+                                <option key={v} value={v}>{v}</option>
+                              ))}
+                            </select>
+                          </div>
+                        );
 
                         if (exerciseType === 'cardio') {
                           // Cardio input fields
@@ -4431,50 +4475,58 @@ const WorkoutTracker = () => {
 
                         if (exerciseType === 'bodyweight') {
                           return (
-                            <div key={setIdx} className={`grid grid-cols-[2.25rem_1fr_1fr_2rem] gap-2 items-center ${set.completed ? 'opacity-60 border-l-2 border-emerald-500 pl-1.5 -ml-1.5' : ''}`}>
-                              <button
-                                type="button"
-                                onClick={() => toggleSetCompleted(exIdx, setIdx)}
-                                className={`w-9 h-9 rounded-full flex items-center justify-center justify-self-center text-sm font-medium transition-colors ${set.completed ? 'bg-emerald-600 text-white' : 'bg-gray-700 text-gray-300 hover:bg-gray-600'}`}
-                                title={set.completed ? 'Mark set incomplete' : 'Mark set complete'}
-                              >
-                                {set.completed ? <Check className="w-4 h-4" /> : setIdx + 1}
-                              </button>
-                              <NumberField
-                                value={set.reps || ''}
-                                onChange={(v) => {
-                                  const newExercises = [...exercises];
-                                  newExercises[exIdx].sets[setIdx].reps = v;
-                                  setExercises(newExercises);
-                                }}
-                                step={1}
-                                placeholder="Reps"
-                                ariaLabel={`Set ${setIdx + 1} reps`}
-                              />
-                              <NumberField
-                                value={set.holdTime || ''}
-                                onChange={(v) => {
-                                  const newExercises = [...exercises];
-                                  newExercises[exIdx].sets[setIdx].holdTime = v;
-                                  setExercises(newExercises);
-                                }}
-                                step={5}
-                                placeholder="Hold"
-                                ariaLabel={`Set ${setIdx + 1} hold time in seconds`}
-                              />
-                              {exercise.sets.length > 1 ? (
+                            <div key={setIdx} className={`space-y-0.5 ${set.completed ? 'border-l-2 border-emerald-500 pl-1.5 -ml-1.5' : ''}`}>
+                              <div className={`grid grid-cols-[2.25rem_1fr_1fr_2rem] gap-2 items-center ${set.completed ? 'opacity-60' : ''}`}>
                                 <button
-                                  onClick={() => {
+                                  type="button"
+                                  onClick={() => toggleSetCompleted(exIdx, setIdx)}
+                                  className={`w-9 h-9 rounded-full flex items-center justify-center justify-self-center text-sm font-medium transition-colors ${set.completed ? 'bg-emerald-600 text-white' : 'bg-gray-700 text-gray-300 hover:bg-gray-600'}`}
+                                  title={set.completed ? 'Mark set incomplete' : 'Mark set complete'}
+                                >
+                                  {set.completed ? <Check className="w-4 h-4" /> : setIdx + 1}
+                                </button>
+                                <NumberField
+                                  value={set.reps || ''}
+                                  onChange={(v) => {
                                     const newExercises = [...exercises];
-                                    newExercises[exIdx].sets = newExercises[exIdx].sets.filter((_, idx) => idx !== setIdx);
+                                    newExercises[exIdx].sets[setIdx].reps = v;
                                     setExercises(newExercises);
                                   }}
-                                  className="p-1 hover:bg-red-600/20 text-red-400 rounded transition-colors justify-self-center"
-                                  title="Remove set"
-                                >
-                                  <X className="w-3.5 h-3.5" />
-                                </button>
-                              ) : <span />}
+                                  step={1}
+                                  placeholder="Reps"
+                                  ariaLabel={`Set ${setIdx + 1} reps`}
+                                />
+                                <NumberField
+                                  value={set.holdTime || ''}
+                                  onChange={(v) => {
+                                    const newExercises = [...exercises];
+                                    newExercises[exIdx].sets[setIdx].holdTime = v;
+                                    setExercises(newExercises);
+                                  }}
+                                  step={5}
+                                  placeholder="Hold"
+                                  ariaLabel={`Set ${setIdx + 1} hold time in seconds`}
+                                />
+                                {exercise.sets.length > 1 ? (
+                                  <button
+                                    onClick={() => {
+                                      const newExercises = [...exercises];
+                                      newExercises[exIdx].sets = newExercises[exIdx].sets.filter((_, idx) => idx !== setIdx);
+                                      setExercises(newExercises);
+                                    }}
+                                    className="p-1 hover:bg-red-600/20 text-red-400 rounded transition-colors justify-self-center"
+                                    title="Remove set"
+                                  >
+                                    <X className="w-3.5 h-3.5" />
+                                  </button>
+                                ) : <span />}
+                              </div>
+                              <div className="grid grid-cols-[2.25rem_1fr_1fr_2rem] gap-2">
+                                <span />
+                                <span />
+                                {warmupRpeControls}
+                                <span />
+                              </div>
                             </div>
                           );
                         }
@@ -4574,7 +4626,6 @@ const WorkoutTracker = () => {
                         const tmBase = tmData?.trainingMax;
                         const wNum = parseFloat(set.weight);
                         const pctOfTM = (tmBase && wNum) ? (wNum / tmBase * 100).toFixed(1).replace(/\.0$/, '') : null;
-                        const hasSubline = pctOfTM || comparison === 'improved' || comparison === 'matched';
 
                         return (
                           <div key={setIdx} className={`space-y-0.5 ${set.completed ? 'border-l-2 border-emerald-500 pl-1.5 -ml-1.5' : ''}`}>
@@ -4625,8 +4676,9 @@ const WorkoutTracker = () => {
                                 </button>
                               ) : <span />}
                             </div>
-                            {hasSubline && (
-                              <div className="grid grid-cols-[2.25rem_1fr_1fr_2rem] gap-2">
+                            {/* Sub-line: always rendered — it carries the warmup toggle and RPE picker,
+                                alongside the optional %TM badge and comparison text. */}
+                            <div className="grid grid-cols-[2.25rem_1fr_1fr_2rem] gap-2">
                                 <span />
                                 <div className="flex items-center gap-2 text-xs">
                                   {pctOfTM && (
@@ -4641,10 +4693,9 @@ const WorkoutTracker = () => {
                                     <span className="text-blue-400" title="Matched previous session">✓ matched</span>
                                   )}
                                 </div>
+                                {warmupRpeControls}
                                 <span />
-                                <span />
-                              </div>
-                            )}
+                            </div>
                           </div>
                         );
                       })}
@@ -4975,11 +5026,11 @@ const WorkoutTracker = () => {
                   const allPRs = [];
                   exercises.forEach(exercise => {
                     const exerciseType = exercise.type || 'strength';
-                    const prs = checkForPRs(exercise.name, exercise.sets, logDate, exerciseType);
+                    const prs = checkForPRs(exercise.name, performedSets(exercise), logDate, exerciseType);
                     allPRs.push(...prs);
 
                     // Update PRs in state
-                    updatePRs(exercise.name, exercise.sets, logDate, logKey, exerciseType);
+                    updatePRs(exercise.name, performedSets(exercise), logDate, logKey, exerciseType);
                   });
 
                   // Save workout log — strip UI-only metadata before persisting
