@@ -1667,8 +1667,11 @@ const WorkoutTracker = () => {
       personalRecords,
       currentBlock,
       blockMetadata,
+      // importData already restores trainingMaxes, but export never wrote them — so a restore
+      // silently lost every training max, and with it every % of TM auto-fill in the template.
+      trainingMaxes,
       exportDate: new Date().toISOString(),
-      version: '2.0'
+      version: '2.1'
     };
     
     const jsonString = JSON.stringify(data, null, 2);
