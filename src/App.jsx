@@ -1,10 +1,17 @@
 import React, { useState, useMemo, useCallback, useRef } from 'react';
-import { Plus, Minus, ChevronLeft, ChevronRight, ChevronDown, ArrowUp, ArrowDown, TrendingUp, Calendar, Dumbbell, Save, X, History, Settings, Trash2, Edit3, Trophy, LogIn, LogOut, GripVertical, Timer, Check, Volume2, VolumeX } from 'lucide-react';
+import { Plus, Minus, ChevronLeft, ChevronRight, ChevronDown, ArrowUp, ArrowDown, TrendingUp, Calendar, Dumbbell, Save, X, History, Settings, Trash2, Edit3, Trophy, LogIn, LogOut, GripVertical, Timer, Check, Volume2, VolumeX, RefreshCw, Download, Upload } from 'lucide-react';
 import { LineChart, Line, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
 import Fuse from 'fuse.js';
 import { supabase } from './supabaseClient';
 
 const DEFAULT_TM_PERCENT = 90;
+
+// Epley is only reliable in low rep ranges; above this a set produces no e1RM estimate at all.
+const E1RM_MAX_REPS = 12;
+
+// All days the Calendar/Template can show, and their display labels.
+const ALL_DAYS = ['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday'];
+const DAY_LABELS = { monday: 'Monday', tuesday: 'Tuesday', wednesday: 'Wednesday', thursday: 'Thursday', friday: 'Friday', saturday: 'Saturday', sunday: 'Sunday' };
 
 // --- Exercise-name normalization & similarity (for duplicate detection) ---
 // Common gym abbreviations expanded so "DB Bench Press" matches "Dumbbell Bench Press".
@@ -61,6 +68,15 @@ const findSimilarExercise = (name, candidates, threshold = 0.6) => {
   return best;
 };
 
+// A set counts unless it's explicitly excluded. Warmups never count. Completion only filters
+// once the user has actually used it on this exercise — so older logs, where nothing was ever
+// marked complete, still count in full.
+const performedSets = (exercise) => {
+  const sets = exercise?.sets || [];
+  const anyCompleted = sets.some(s => s.completed);
+  return sets.filter(s => !s.warmup && (!anyCompleted || s.completed));
+};
+
 function ExerciseTypeBadge({ type }) {
   const styles = {
     cardio: 'bg-blue-900/50 text-blue-400',
@@ -86,7 +102,7 @@ function ModalHeader({ title, onClose }) {
 }
 
 // A blank starting block — every new install (and every reset) begins here, not with any
-// specific person's programming. `template` keys must stay in sync with `days` below.
+// specific person's programming. `template` keys must stay a subset of `ALL_DAYS` above.
 const createEmptyBlock = () => ({
   id: 1,
   name: 'My Training Block',
@@ -429,13 +445,14 @@ const WorkoutTracker = () => {
 
         const exerciseName = exercise.name;
         const exerciseType = exercise.type || 'strength';
+        const psets = performedSets(exercise);
 
         if (!migratedPRs[exerciseName]) {
           migratedPRs[exerciseName] = {};
         }
 
         if (exerciseType === 'bodyweight') {
-          exercise.sets.forEach(set => {
+          psets.forEach(set => {
             const reps = parseInt(set.reps);
             const holdTime = parseInt(set.holdTime);
 
@@ -447,9 +464,37 @@ const WorkoutTracker = () => {
               migratedPRs[exerciseName].longestHold = { value: holdTime, date: log.date, logKey };
             }
           });
+        } else if (exerciseType === 'tabata') {
+          // Tabata PR migration
+          psets.forEach(set => {
+            const rounds = parseInt(set.rounds);
+
+            if (!rounds) return;
+
+            // Update most rounds
+            if (!migratedPRs[exerciseName].mostRounds || rounds > migratedPRs[exerciseName].mostRounds.value) {
+              migratedPRs[exerciseName].mostRounds = {
+                value: rounds,
+                workSeconds: set.workSeconds || 20,
+                restSeconds: set.restSeconds || 10,
+                date: log.date,
+                logKey
+              };
+            }
+          });
+
+          // Update most sets
+          const completedSets = psets.filter(s => parseInt(s.rounds) > 0).length;
+          if (completedSets > 0 && (!migratedPRs[exerciseName].mostSets || completedSets > migratedPRs[exerciseName].mostSets.value)) {
+            migratedPRs[exerciseName].mostSets = {
+              value: completedSets,
+              date: log.date,
+              logKey
+            };
+          }
         } else if (exerciseType === 'cardio') {
           // Cardio PR migration
-          exercise.sets.forEach(set => {
+          psets.forEach(set => {
             const distance = parseFloat(set.distance);
             const timeSeconds = parseTimeToSeconds(set.time);
 
@@ -495,14 +540,16 @@ const WorkoutTracker = () => {
           });
         } else {
           // Strength PR migration
-          exercise.sets.forEach(set => {
+          psets.forEach(set => {
             const weight = parseFloat(set.weight);
             const reps = parseFloat(set.reps);
 
             if (!weight || !reps) return;
 
             const volume = weight * reps;
-            const estimated1RM = Math.round(weight * (1 + reps / 30));
+            // Use the shared helper so the E1RM_MAX_REPS cap applies here too — a rebuild must
+            // not resurrect the inflated estimates that live logging now refuses to record.
+            const estimated1RM = calculateEstimated1RM(weight, reps);
 
             // Update max weight
             if (!migratedPRs[exerciseName].maxWeight || weight > migratedPRs[exerciseName].maxWeight.value) {
@@ -514,13 +561,14 @@ const WorkoutTracker = () => {
               migratedPRs[exerciseName].maxVolume = { value: volume, date: log.date, logKey, weight, reps };
             }
 
-            // Update max reps (overall, not per weight)
-            if (!migratedPRs[exerciseName].maxReps || reps > migratedPRs[exerciseName].maxReps.value) {
-              migratedPRs[exerciseName].maxReps = { value: reps, weight, date: log.date, logKey };
+            // Update max reps at weight
+            const maxRepsKey = `maxRepsAt${roundToNearest2_5(weight)}`;
+            if (!migratedPRs[exerciseName][maxRepsKey] || reps > migratedPRs[exerciseName][maxRepsKey].reps) {
+              migratedPRs[exerciseName][maxRepsKey] = { reps, weight, date: log.date, logKey };
             }
 
-            // Update estimated 1RM
-            if (!migratedPRs[exerciseName].estimated1RM || estimated1RM > migratedPRs[exerciseName].estimated1RM.value) {
+            // Update estimated 1RM (0 means no usable estimate — see checkForPRs)
+            if (estimated1RM > 0 && (!migratedPRs[exerciseName].estimated1RM || estimated1RM > migratedPRs[exerciseName].estimated1RM.value)) {
               migratedPRs[exerciseName].estimated1RM = { value: estimated1RM, date: log.date, logKey, weight, reps };
             }
           });
@@ -566,12 +614,22 @@ const WorkoutTracker = () => {
       setWorkoutLogs(parsedLogs);
       if (savedBlocks) setBlocks(JSON.parse(savedBlocks));
 
-      const parsedBlock = savedCurrentBlock ? parseInt(savedCurrentBlock) || 1 : 1;
+      const parsedBlockMetadata = savedBlockMetadata ? JSON.parse(savedBlockMetadata) : null;
+
+      // Clamp the restored block forward to the highest block with any data — if the user was
+      // browsing history when they closed the app, don't reopen there, reopen on the live cycle.
+      const fromLogs = Object.keys(parsedLogs)
+        .map(k => parseInt(k.match(/^block(\d+)-/)?.[1])).filter(Boolean);
+      const fromMeta = parsedBlockMetadata ? Object.keys(parsedBlockMetadata).map(Number).filter(Boolean) : [];
+      const highestBlock = Math.max(1, ...fromLogs, ...fromMeta);
+
+      const storedBlock = savedCurrentBlock ? parseInt(savedCurrentBlock) || 1 : 1;
+      const parsedBlock = Math.max(storedBlock, highestBlock);
       setCurrentBlock(parsedBlock);
       setCurrentWeek(getLastPopulatedWeek(parsedBlock, parsedLogs));
 
-      if (savedBlockMetadata) {
-        setBlockMetadata(JSON.parse(savedBlockMetadata));
+      if (parsedBlockMetadata) {
+        setBlockMetadata(parsedBlockMetadata);
       } else {
         // Seed block 1 metadata — infer start date from earliest log if possible
         const block1Dates = Object.entries(parsedLogs)
@@ -585,11 +643,10 @@ const WorkoutTracker = () => {
         localStorage.setItem('block-metadata', JSON.stringify(seed));
       }
 
-      if (Object.keys(parsedLogs).length > 0) {
-        const migratedPRs = migrateHistoricalPRs(parsedLogs);
-        setPersonalRecords(migratedPRs);
-      } else if (savedPRs) {
+      if (savedPRs) {
         setPersonalRecords(JSON.parse(savedPRs));
+      } else if (Object.keys(parsedLogs).length > 0) {
+        setPersonalRecords(migrateHistoricalPRs(parsedLogs));
       }
 
       const savedTM = localStorage.getItem('training-maxes');
@@ -621,11 +678,10 @@ const WorkoutTracker = () => {
       setBlockMetadata({ 1: { name: 'Block 1', startDate } });
     }
 
-    if (Object.keys(parsedLogs).length > 0) {
-      const migratedPRs = migrateHistoricalPRs(parsedLogs);
-      setPersonalRecords(migratedPRs);
-    } else {
-      setPersonalRecords(data.personal_records || {});
+    if (data.personal_records && Object.keys(data.personal_records).length > 0) {
+      setPersonalRecords(data.personal_records);
+    } else if (Object.keys(parsedLogs).length > 0) {
+      setPersonalRecords(migrateHistoricalPRs(parsedLogs));
     }
 
     if (data.training_maxes && Object.keys(data.training_maxes).length > 0) {
@@ -1079,6 +1135,7 @@ const WorkoutTracker = () => {
   // Personal Records Functions
   const calculateEstimated1RM = (weight, reps) => {
     if (!weight || !reps || reps < 1) return 0;
+    if (reps > E1RM_MAX_REPS) return 0;
     // Epley formula: 1RM = weight × (1 + reps/30)
     return Math.round(parseFloat(weight) * (1 + parseFloat(reps) / 30));
   };
@@ -1372,7 +1429,7 @@ const WorkoutTracker = () => {
       }
 
       // Check max reps at specific weight
-      const maxRepsKey = `maxRepsAt${Math.floor(weight)}`;
+      const maxRepsKey = `maxRepsAt${roundToNearest2_5(weight)}`;
       if (!currentPRs[maxRepsKey] || reps > currentPRs[maxRepsKey].reps) {
         prsDetected.push({
           type: 'maxReps',
@@ -1384,8 +1441,9 @@ const WorkoutTracker = () => {
         });
       }
 
-      // Check estimated 1RM
-      if (!currentPRs.estimated1RM || estimated1RM > currentPRs.estimated1RM.value) {
+      // Check estimated 1RM. Sets above E1RM_MAX_REPS yield 0 (Epley isn't reliable that high),
+      // and a 0 is the absence of an estimate — never a PR.
+      if (estimated1RM > 0 && (!currentPRs.estimated1RM || estimated1RM > currentPRs.estimated1RM.value)) {
         prsDetected.push({
           type: 'estimated1RM',
           exerciseName,
@@ -1512,13 +1570,13 @@ const WorkoutTracker = () => {
         }
 
         // Update max reps at weight
-        const maxRepsKey = `maxRepsAt${Math.floor(weight)}`;
+        const maxRepsKey = `maxRepsAt${roundToNearest2_5(weight)}`;
         if (!updatedPRs[maxRepsKey] || reps > updatedPRs[maxRepsKey].reps) {
           updatedPRs[maxRepsKey] = { reps, weight, date: logDate, logKey };
         }
 
-        // Update estimated 1RM
-        if (!updatedPRs.estimated1RM || estimated1RM > updatedPRs.estimated1RM.value) {
+        // Update estimated 1RM (0 means no usable estimate — see checkForPRs)
+        if (estimated1RM > 0 && (!updatedPRs.estimated1RM || estimated1RM > updatedPRs.estimated1RM.value)) {
           updatedPRs.estimated1RM = { value: estimated1RM, date: logDate, logKey, weight, reps };
         }
       });
@@ -1539,15 +1597,16 @@ const WorkoutTracker = () => {
       .map(entry => {
         let value = 0;
         const exerciseType = entry.type || 'strength';
+        const pset = performedSets(entry);
 
         if (exerciseType === 'cardio') {
           // Cardio chart types
           if (type === 'distance') {
             // Total distance in session
-            value = calculateTotalDistance(entry.sets);
+            value = calculateTotalDistance(pset);
           } else if (type === 'pace') {
             // Best pace in session (lowest pace = fastest)
-            const paces = entry.sets
+            const paces = pset
               .map(s => {
                 const d = parseFloat(s.distance);
                 const t = parseTimeToSeconds(s.time);
@@ -1557,37 +1616,37 @@ const WorkoutTracker = () => {
             value = paces.length > 0 ? Math.min(...paces) : 0;
           } else if (type === 'duration') {
             // Total duration in session (in minutes for display)
-            value = calculateTotalDuration(entry.sets) / 60;
+            value = calculateTotalDuration(pset) / 60;
           }
         } else if (exerciseType === 'bodyweight') {
           if (type === 'reps') {
-            value = Math.max(...entry.sets.map(s => parseInt(s.reps) || 0));
+            value = Math.max(...pset.map(s => parseInt(s.reps) || 0));
           } else if (type === 'holdTime') {
-            value = Math.max(...entry.sets.map(s => parseInt(s.holdTime) || 0));
+            value = Math.max(...pset.map(s => parseInt(s.holdTime) || 0));
           }
         } else if (exerciseType === 'tabata') {
           // Tabata chart types
           if (type === 'rounds') {
             // Total rounds in session
-            value = entry.sets.reduce((sum, s) => sum + (parseInt(s.rounds) || 0), 0);
+            value = pset.reduce((sum, s) => sum + (parseInt(s.rounds) || 0), 0);
           } else if (type === 'sets') {
             // Number of sets completed
-            value = entry.sets.filter(s => parseInt(s.rounds) > 0).length;
+            value = pset.filter(s => parseInt(s.rounds) > 0).length;
           }
         } else {
           // Strength chart types
           if (type === 'e1rm') {
             // Best estimated 1RM (Epley) across the session's sets
-            value = Math.max(...entry.sets.map(s => calculateEstimated1RM(s.weight, s.reps)));
+            value = Math.max(...pset.map(s => calculateEstimated1RM(s.weight, s.reps)));
           } else if (type === 'weight') {
             // Max weight in the session
-            value = Math.max(...entry.sets.map(s => parseFloat(s.weight) || 0));
+            value = Math.max(...pset.map(s => parseFloat(s.weight) || 0));
           } else if (type === 'volume') {
             // Total volume for the session
-            value = calculateVolume(entry.sets);
+            value = calculateVolume(pset);
           } else if (type === 'reps') {
             // Max reps in the session
-            value = Math.max(...entry.sets.map(s => parseFloat(s.reps) || 0));
+            value = Math.max(...pset.map(s => parseFloat(s.reps) || 0));
           }
         }
 
@@ -1608,8 +1667,11 @@ const WorkoutTracker = () => {
       personalRecords,
       currentBlock,
       blockMetadata,
+      // importData already restores trainingMaxes, but export never wrote them — so a restore
+      // silently lost every training max, and with it every % of TM auto-fill in the template.
+      trainingMaxes,
       exportDate: new Date().toISOString(),
-      version: '2.0'
+      version: '2.1'
     };
     
     const jsonString = JSON.stringify(data, null, 2);
@@ -1703,7 +1765,7 @@ const WorkoutTracker = () => {
   };
 
   const handleSetWeek1AsTemplate = () => {
-    const allDays = ['monday','tuesday','wednesday','thursday','friday','saturday','sunday'];
+    const allDays = ALL_DAYS;
     const hasData = allDays.some(day =>
       workoutLogs[`block${currentBlock}-week1-${day}`]?.exercises?.length > 0
     );
@@ -1778,8 +1840,11 @@ const WorkoutTracker = () => {
     localStorage.removeItem('training-maxes');
   };
 
-  const days = ['monday', 'tuesday', 'wednesday', 'thursday', 'friday'];
-  const dayNames = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday'];
+  // Days shown on the Calendar: any day defined in the template, or that has a log this week
+  // (so a Saturday/Sunday workout — buildable in the Template editor — is reachable here too).
+  const visibleDays = useMemo(() => ALL_DAYS.filter(d =>
+    blocks[0]?.template?.[d] || workoutLogs[`block${currentBlock}-week${currentWeek}-${d}`]
+  ), [blocks, workoutLogs, currentBlock, currentWeek]);
 
   const getCurrentTemplate = () => {
     return blocks[0]?.template || {};
@@ -1792,12 +1857,15 @@ const WorkoutTracker = () => {
     return date.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
   };
 
-  const getAllExerciseHistory = (exerciseName) => {
+  const getAllExerciseHistory = (exerciseName, excludeLogKey) => {
     const history = [];
+    const target = (exerciseName || '').toLowerCase().trim();
+    if (!target) return history;
     Object.entries(workoutLogs).forEach(([key, log]) => {
+      if (excludeLogKey && key === excludeLogKey) return;
       if (log.date && log.exercises) {
         log.exercises.forEach(ex => {
-          if (ex.name === exerciseName) {
+          if (ex.name && ex.name.toLowerCase().trim() === target) {
             history.push({
               date: log.date,
               sets: ex.sets,
@@ -1812,6 +1880,24 @@ const WorkoutTracker = () => {
     });
     return history.sort((a, b) => new Date(b.date) - new Date(a.date));
   };
+
+  // Reset the Exercise Trend chart's metric to that exercise's type-appropriate default whenever
+  // the selected exercise changes — otherwise chartType can be left on a metric ('e1rm', say) that
+  // doesn't exist for the newly-selected exercise's type, rendering an empty chart with no
+  // highlighted toggle button.
+  React.useEffect(() => {
+    if (!selectedExerciseHistory) return;
+    const history = getAllExerciseHistory(selectedExerciseHistory);
+    const exerciseType = history.length > 0 ? (history[0].type || 'strength') : 'strength';
+    const defaultChartType = {
+      strength: 'e1rm',
+      cardio: 'distance',
+      bodyweight: 'reps',
+      tabata: 'rounds'
+    }[exerciseType] || 'e1rm';
+    setChartType(defaultChartType);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedExerciseHistory]);
 
   // Get all unique exercise names for fuzzy search (deduplicated by case)
   const getAllExerciseNames = useMemo(() => {
@@ -1913,7 +1999,7 @@ const WorkoutTracker = () => {
       if ((ex.type || 'strength') !== 'strength' || !ex.name) return;
       // Best estimated 1RM across this exercise's sets.
       let best1RM = 0, bestWeight = 0, bestReps = 0;
-      (ex.sets || []).forEach(set => {
+      performedSets(ex).forEach(set => {
         const e1rm = calculateEstimated1RM(set.weight, set.reps);
         if (e1rm > best1RM) { best1RM = e1rm; bestWeight = parseFloat(set.weight); bestReps = parseFloat(set.reps); }
       });
@@ -1998,7 +2084,7 @@ const WorkoutTracker = () => {
     return Object.entries(workoutLogs)
       .filter(([k]) => k.startsWith(`block${blockNum}-`))
       .reduce((sum, [, log]) => sum + (log.exercises || []).reduce(
-        (s, ex) => s + (((ex.type || 'strength') === 'strength') ? calculateVolume(ex.sets) : 0), 0
+        (s, ex) => s + (((ex.type || 'strength') === 'strength') ? calculateVolume(performedSets(ex)) : 0), 0
       ), 0);
   };
 
@@ -2014,7 +2100,7 @@ const WorkoutTracker = () => {
       const m = key.match(new RegExp(`^block${blockNum}-week(\\d+)-`));
       if (!m || !log.exercises) return;
       const week = parseInt(m[1]);
-      const vol = log.exercises.reduce((s, ex) => s + (((ex.type || 'strength') === 'strength') ? calculateVolume(ex.sets) : 0), 0);
+      const vol = log.exercises.reduce((s, ex) => s + (((ex.type || 'strength') === 'strength') ? calculateVolume(performedSets(ex)) : 0), 0);
       weekTotals[week] = (weekTotals[week] || 0) + vol;
     });
     return Object.entries(weekTotals)
@@ -2030,8 +2116,20 @@ const WorkoutTracker = () => {
     return weeks.length > 0 ? Math.max(...weeks) : 1;
   };
 
-  const getPreviousSession = (exerciseName) => {
-    const history = getAllExerciseHistory(exerciseName);
+  // Highest block number with any data (logs or metadata) — drives block-nav caps and
+  // read-only-history behavior. `currentBlock` is the block currently being viewed, which
+  // may be less than this while browsing history.
+  const highestBlockWithData = useMemo(() => {
+    const fromLogs = Object.keys(workoutLogs)
+      .map(k => parseInt(k.match(/^block(\d+)-/)?.[1])).filter(Boolean);
+    const fromMeta = Object.keys(blockMetadata).map(Number).filter(Boolean);
+    return Math.max(1, ...fromLogs, ...fromMeta);
+  }, [workoutLogs, blockMetadata]);
+
+  const isViewingCurrentBlock = currentBlock === highestBlockWithData;
+
+  const getPreviousSession = (exerciseName, excludeLogKey) => {
+    const history = getAllExerciseHistory(exerciseName, excludeLogKey);
     // Get the most recent session (first item in sorted array)
     return history.length > 0 ? history[0] : null;
   };
@@ -2111,7 +2209,10 @@ const WorkoutTracker = () => {
 
     if (existingLog) {
       setLogDate(existingLog.date);
-      setExercises(existingLog.exercises);
+      // Deep copy: existingLog.exercises are live references into workoutLogs state, and set-input
+      // handlers mutate exercise/set objects in place after a shallow array copy — without cloning
+      // here, editing a saved workout would mutate workoutLogs directly.
+      setExercises(structuredClone(existingLog.exercises));
       setPrefilled(false);
     } else {
       setLogDate(new Date().toISOString().split('T')[0]);
@@ -2248,7 +2349,7 @@ const WorkoutTracker = () => {
     const nowCompleting = !set.completed;
 
     if (nowCompleting) {
-      const previousSession = getPreviousSession(exercise.name);
+      const previousSession = getPreviousSession(exercise.name, currentLogKey);
       exercise.sets[setIdx] = { ...prefillSetOnComplete(exercise, setIdx, previousSession), completed: true };
     } else {
       exercise.sets[setIdx] = { ...set, completed: false };
@@ -2351,7 +2452,7 @@ const WorkoutTracker = () => {
                 <div className="p-4 bg-emerald-950/30 border border-emerald-900/50 rounded-lg">
                   <p className="text-sm text-gray-400">Workouts (Block)</p>
                   <p className="text-2xl md:text-3xl font-bold text-emerald-400">
-                    {Object.keys(workoutLogs).filter(k => k.startsWith(`block${currentBlock}`)).length}
+                    {Object.keys(workoutLogs).filter(k => k.startsWith(`block${currentBlock}-`)).length}
                   </p>
                 </div>
                 <div className="p-4 bg-blue-950/30 border border-blue-900/50 rounded-lg">
@@ -2820,7 +2921,7 @@ const WorkoutTracker = () => {
                   const history = getAllExerciseHistory(selectedExerciseHistory);
                   const exerciseType = history.length > 0 ? (history[0].type || 'strength') : 'strength';
                   const strengthHistory = exerciseType === 'strength'
-                    ? history.map(e => calculateVolume(e.sets)).filter(v => v > 0)
+                    ? history.map(e => calculateVolume(performedSets(e))).filter(v => v > 0)
                     : [];
                   const firstVol = strengthHistory.length > 0 ? strengthHistory[strengthHistory.length - 1] : null;
                   const bestVol = strengthHistory.length > 0 ? Math.max(...strengthHistory) : null;
@@ -3023,6 +3124,25 @@ const WorkoutTracker = () => {
               </button>
               {manageExOpen && (
                 <div className="mt-3">
+                  {/* Manual PR rebuild — PRs are no longer auto-migrated on load, so give users an escape hatch after editing/deleting logs */}
+                  <div className="mb-4 flex items-center justify-between gap-3 p-3 bg-gray-900/40 rounded-lg border border-gray-700">
+                    <p className="text-xs text-gray-400">
+                      Rebuild all personal records from your workout logs. Use this after editing or deleting logged sets.
+                    </p>
+                    <button
+                      onClick={() => {
+                        if (window.confirm('Recalculate all personal records from your workout logs? This overwrites your current PRs with values rebuilt from history.')) {
+                          setPersonalRecords(migrateHistoricalPRs(workoutLogs));
+                        }
+                      }}
+                      className="shrink-0 flex items-center gap-1.5 text-xs px-3 py-2 bg-gray-700 hover:bg-gray-600 text-gray-200 rounded-lg border border-gray-600 font-medium"
+                      title="Recalculate PRs from logs"
+                    >
+                      <RefreshCw className="w-3.5 h-3.5" />
+                      Recalculate PRs from Logs
+                    </button>
+                  </div>
+
                   {/* Possible duplicates — clusters of similarly-named exercises that can be merged */}
                   {duplicateClusters.length > 0 && (
                     <div className="mb-4 p-3 bg-amber-900/20 border border-amber-700/40 rounded-lg">
@@ -3199,7 +3319,7 @@ const WorkoutTracker = () => {
                     const newBlocks = [...blocks];
                     const template = newBlocks[0].template;
                     const existingDays = Object.keys(template);
-                    const allDays = ['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday'];
+                    const allDays = ALL_DAYS;
                     const availableDays = allDays.filter(d => !existingDays.includes(d));
                     if (availableDays.length > 0) {
                       template[availableDays[0]] = { name: 'New Workout', exercises: [] };
@@ -3214,7 +3334,7 @@ const WorkoutTracker = () => {
               </div>
 
               <div className="grid gap-3">
-                {['monday','tuesday','wednesday','thursday','friday','saturday','sunday']
+                {ALL_DAYS
                   .filter(d => blocks[0]?.template[d])
                   .map(dayKey => {
                     const dayData = blocks[0].template[dayKey];
@@ -3556,6 +3676,30 @@ const WorkoutTracker = () => {
             {/* Reset Template */}
             <div className="pt-4 border-t border-gray-700 flex flex-wrap gap-3">
               <button
+                onClick={exportData}
+                className="flex items-center gap-2 px-4 py-2 bg-emerald-600/20 hover:bg-emerald-600/30 text-emerald-400 rounded-lg text-sm"
+                title="Download a JSON backup of all your data"
+              >
+                <Download className="w-4 h-4" />
+                Export Backup
+              </button>
+              <label
+                className="flex items-center gap-2 px-4 py-2 bg-gray-700 hover:bg-gray-600 text-gray-300 rounded-lg text-sm cursor-pointer"
+                title="Restore data from a previously exported JSON backup"
+              >
+                <Upload className="w-4 h-4" />
+                Import Backup
+                <input
+                  type="file"
+                  accept="application/json"
+                  className="hidden"
+                  onChange={(e) => {
+                    importData(e);
+                    e.target.value = '';
+                  }}
+                />
+              </label>
+              <button
                 onClick={() => {
                   if (window.confirm('Reset template to default? This will clear all your custom workout days and exercises.')) {
                     const newBlocks = [...blocks];
@@ -3593,7 +3737,7 @@ const WorkoutTracker = () => {
               {/* Action buttons */}
               <div className="flex justify-end gap-2">
                 {(() => {
-                  const allDays = ['monday','tuesday','wednesday','thursday','friday','saturday','sunday'];
+                  const allDays = ALL_DAYS;
                   const week1HasData = allDays.some(day =>
                     workoutLogs[`block${currentBlock}-week1-${day}`]?.exercises?.length > 0
                   );
@@ -3611,7 +3755,7 @@ const WorkoutTracker = () => {
                 <button
                   onClick={() => {
                     if (!window.confirm("Start a new training cycle? You'll return to Week 1.")) return;
-                    const newBlockNum = currentBlock + 1;
+                    const newBlockNum = Math.max(currentBlock, highestBlockWithData) + 1;
                     const today = new Date().toISOString().split('T')[0];
                     setBlockMetadata({ ...blockMetadata, [newBlockNum]: { name: `Block ${newBlockNum}`, startDate: today } });
                     setCurrentBlock(newBlockNum);
@@ -3625,14 +3769,51 @@ const WorkoutTracker = () => {
                 </button>
               </div>
 
+              {!isViewingCurrentBlock && (
+                <div className="px-4 py-2 rounded-lg border border-amber-700/40 bg-amber-900/20 text-amber-300 text-sm">
+                  Viewing a past training cycle — read-only. You can look at logged workouts, but empty days can't be opened and new workouts can't be saved here.
+                </div>
+              )}
+
+              {/* Block navigation row */}
+              <div className="flex items-center justify-between">
+                <h3 className="text-sm font-semibold text-gray-400">
+                  {blockMetadata[currentBlock]?.name || `Training Cycle ${currentBlock}`}
+                </h3>
+                <div className="flex gap-2">
+                  <button
+                    onClick={() => {
+                      const newBlock = Math.max(1, currentBlock - 1);
+                      setCurrentBlock(newBlock);
+                      setCurrentWeek(getLastPopulatedWeek(newBlock, workoutLogs));
+                    }}
+                    className="p-2 rounded-lg hover:bg-gray-700 text-gray-300 disabled:opacity-50"
+                    disabled={currentBlock === 1}
+                    title="Previous block"
+                  >
+                    <ChevronLeft className="w-5 h-5" />
+                  </button>
+                  <span className="px-4 py-2 bg-gray-700 rounded-lg text-gray-300 font-medium">
+                    Block {currentBlock}
+                  </span>
+                  <button
+                    onClick={() => {
+                      const newBlock = Math.min(highestBlockWithData, currentBlock + 1);
+                      setCurrentBlock(newBlock);
+                      setCurrentWeek(getLastPopulatedWeek(newBlock, workoutLogs));
+                    }}
+                    disabled={currentBlock >= highestBlockWithData}
+                    className="p-2 rounded-lg hover:bg-gray-700 text-gray-300 disabled:opacity-30"
+                    title="Next block"
+                  >
+                    <ChevronRight className="w-5 h-5" />
+                  </button>
+                </div>
+              </div>
+
               {/* Week navigation row */}
               <div className="flex items-center justify-between">
-                <div>
-                  <h2 className="text-2xl font-bold text-gray-100">Current Block · Week {currentWeek}</h2>
-                  {blockMetadata[currentBlock]?.name && (
-                    <p className="text-sm text-gray-400 mt-0.5">{blockMetadata[currentBlock].name}</p>
-                  )}
-                </div>
+                <h2 className="text-2xl font-bold text-gray-100">Week {currentWeek}</h2>
                 <div className="flex gap-2">
                   <button
                     onClick={() => setCurrentWeek(Math.max(1, currentWeek - 1))}
@@ -3656,26 +3837,29 @@ const WorkoutTracker = () => {
             </div>
 
             <div className="grid gap-3">
-              {days.map((day, idx) => {
+              {visibleDays.map((day) => {
                 const template = getCurrentTemplate();
                 const workout = template[day];
                 const logKey = `block${currentBlock}-week${currentWeek}-${day}`;
                 const log = workoutLogs[logKey];
-                
+                const isClickable = isViewingCurrentBlock || !!log;
+
                 return (
                   <div
                     key={day}
-                    onClick={() => loadDayIntoLogView(day)}
+                    onClick={() => { if (isClickable) loadDayIntoLogView(day); }}
                     className={`p-4 rounded-lg border transition-all ${
                       log
                         ? 'border-emerald-500 bg-emerald-950/30 hover:bg-emerald-950/50 cursor-pointer'
-                        : 'border-gray-700 bg-gray-800 hover:bg-gray-750 hover:border-gray-600 cursor-pointer'
+                        : isClickable
+                          ? 'border-gray-700 bg-gray-800 hover:bg-gray-750 hover:border-gray-600 cursor-pointer'
+                          : 'border-gray-700 bg-gray-800'
                     }`}
                   >
                     <div className="flex items-center justify-between">
                       <div className="flex-1">
                         <div className="flex items-center gap-3 mb-1 flex-wrap">
-                          <h3 className="font-semibold text-gray-100">{dayNames[idx]}</h3>
+                          <h3 className="font-semibold text-gray-100">{DAY_LABELS[day]}</h3>
                           {log?.date && (
                             <span className="text-xs text-gray-400 bg-gray-700/50 px-2 py-1 rounded">
                               {formatDate(log.date)}
@@ -3872,9 +4056,9 @@ const WorkoutTracker = () => {
 
             <div className="space-y-4">
               {exercises.map((exercise, exIdx) => {
-                const previousSession = getPreviousSession(exercise.name);
-                const currentVolume = calculateVolume(exercise.sets);
-                const previousVolume = previousSession ? calculateVolume(previousSession.sets) : 0;
+                const previousSession = getPreviousSession(exercise.name, currentLogKey);
+                const currentVolume = calculateVolume(performedSets(exercise));
+                const previousVolume = previousSession ? calculateVolume(performedSets(previousSession)) : 0;
                 const volumeChange = previousVolume > 0
                   ? ((currentVolume - previousVolume) / previousVolume * 100).toFixed(1)
                   : null;
@@ -4215,6 +4399,39 @@ const WorkoutTracker = () => {
                       {exercise.sets.map((set, setIdx) => {
                         const exerciseType = exercise.type || 'strength';
                         const comparison = exerciseType === 'strength' ? compareSetToPrevious(set, previousSession?.sets, setIdx) : null;
+                        // Warmup toggle + RPE picker — shared sub-line control for strength/bodyweight sets.
+                        const warmupRpeControls = (
+                          <div className="flex items-center gap-1.5">
+                            <button
+                              type="button"
+                              onClick={() => {
+                                const newExercises = [...exercises];
+                                newExercises[exIdx].sets[setIdx].warmup = !newExercises[exIdx].sets[setIdx].warmup;
+                                setExercises(newExercises);
+                              }}
+                              className={`text-[10px] font-semibold px-1.5 py-0.5 rounded transition-colors ${set.warmup ? 'text-amber-300 bg-amber-900/30' : 'text-gray-500 bg-gray-800 hover:bg-gray-700'}`}
+                              title="Mark as warmup set (excluded from volume and PRs)"
+                            >
+                              W
+                            </button>
+                            <select
+                              value={set.rpe || ''}
+                              onChange={(e) => {
+                                const newExercises = [...exercises];
+                                newExercises[exIdx].sets[setIdx].rpe = e.target.value;
+                                setExercises(newExercises);
+                              }}
+                              className={`text-[10px] rounded px-1 py-0.5 border-0 ${set.rpe ? 'text-purple-300 bg-purple-900/30' : 'text-gray-500 bg-gray-800'}`}
+                              title="RPE (rate of perceived exertion)"
+                              aria-label={`Set ${setIdx + 1} RPE`}
+                            >
+                              <option value=""></option>
+                              {['5', '5.5', '6', '6.5', '7', '7.5', '8', '8.5', '9', '9.5', '10'].map(v => (
+                                <option key={v} value={v}>{v}</option>
+                              ))}
+                            </select>
+                          </div>
+                        );
 
                         if (exerciseType === 'cardio') {
                           // Cardio input fields
@@ -4292,50 +4509,58 @@ const WorkoutTracker = () => {
 
                         if (exerciseType === 'bodyweight') {
                           return (
-                            <div key={setIdx} className={`grid grid-cols-[2.25rem_1fr_1fr_2rem] gap-2 items-center ${set.completed ? 'opacity-60 border-l-2 border-emerald-500 pl-1.5 -ml-1.5' : ''}`}>
-                              <button
-                                type="button"
-                                onClick={() => toggleSetCompleted(exIdx, setIdx)}
-                                className={`w-9 h-9 rounded-full flex items-center justify-center justify-self-center text-sm font-medium transition-colors ${set.completed ? 'bg-emerald-600 text-white' : 'bg-gray-700 text-gray-300 hover:bg-gray-600'}`}
-                                title={set.completed ? 'Mark set incomplete' : 'Mark set complete'}
-                              >
-                                {set.completed ? <Check className="w-4 h-4" /> : setIdx + 1}
-                              </button>
-                              <NumberField
-                                value={set.reps || ''}
-                                onChange={(v) => {
-                                  const newExercises = [...exercises];
-                                  newExercises[exIdx].sets[setIdx].reps = v;
-                                  setExercises(newExercises);
-                                }}
-                                step={1}
-                                placeholder="Reps"
-                                ariaLabel={`Set ${setIdx + 1} reps`}
-                              />
-                              <NumberField
-                                value={set.holdTime || ''}
-                                onChange={(v) => {
-                                  const newExercises = [...exercises];
-                                  newExercises[exIdx].sets[setIdx].holdTime = v;
-                                  setExercises(newExercises);
-                                }}
-                                step={5}
-                                placeholder="Hold"
-                                ariaLabel={`Set ${setIdx + 1} hold time in seconds`}
-                              />
-                              {exercise.sets.length > 1 ? (
+                            <div key={setIdx} className={`space-y-0.5 ${set.completed ? 'border-l-2 border-emerald-500 pl-1.5 -ml-1.5' : ''}`}>
+                              <div className={`grid grid-cols-[2.25rem_1fr_1fr_2rem] gap-2 items-center ${set.completed ? 'opacity-60' : ''}`}>
                                 <button
-                                  onClick={() => {
+                                  type="button"
+                                  onClick={() => toggleSetCompleted(exIdx, setIdx)}
+                                  className={`w-9 h-9 rounded-full flex items-center justify-center justify-self-center text-sm font-medium transition-colors ${set.completed ? 'bg-emerald-600 text-white' : 'bg-gray-700 text-gray-300 hover:bg-gray-600'}`}
+                                  title={set.completed ? 'Mark set incomplete' : 'Mark set complete'}
+                                >
+                                  {set.completed ? <Check className="w-4 h-4" /> : setIdx + 1}
+                                </button>
+                                <NumberField
+                                  value={set.reps || ''}
+                                  onChange={(v) => {
                                     const newExercises = [...exercises];
-                                    newExercises[exIdx].sets = newExercises[exIdx].sets.filter((_, idx) => idx !== setIdx);
+                                    newExercises[exIdx].sets[setIdx].reps = v;
                                     setExercises(newExercises);
                                   }}
-                                  className="p-1 hover:bg-red-600/20 text-red-400 rounded transition-colors justify-self-center"
-                                  title="Remove set"
-                                >
-                                  <X className="w-3.5 h-3.5" />
-                                </button>
-                              ) : <span />}
+                                  step={1}
+                                  placeholder="Reps"
+                                  ariaLabel={`Set ${setIdx + 1} reps`}
+                                />
+                                <NumberField
+                                  value={set.holdTime || ''}
+                                  onChange={(v) => {
+                                    const newExercises = [...exercises];
+                                    newExercises[exIdx].sets[setIdx].holdTime = v;
+                                    setExercises(newExercises);
+                                  }}
+                                  step={5}
+                                  placeholder="Hold"
+                                  ariaLabel={`Set ${setIdx + 1} hold time in seconds`}
+                                />
+                                {exercise.sets.length > 1 ? (
+                                  <button
+                                    onClick={() => {
+                                      const newExercises = [...exercises];
+                                      newExercises[exIdx].sets = newExercises[exIdx].sets.filter((_, idx) => idx !== setIdx);
+                                      setExercises(newExercises);
+                                    }}
+                                    className="p-1 hover:bg-red-600/20 text-red-400 rounded transition-colors justify-self-center"
+                                    title="Remove set"
+                                  >
+                                    <X className="w-3.5 h-3.5" />
+                                  </button>
+                                ) : <span />}
+                              </div>
+                              <div className="grid grid-cols-[2.25rem_1fr_1fr_2rem] gap-2">
+                                <span />
+                                <span />
+                                {warmupRpeControls}
+                                <span />
+                              </div>
                             </div>
                           );
                         }
@@ -4435,7 +4660,6 @@ const WorkoutTracker = () => {
                         const tmBase = tmData?.trainingMax;
                         const wNum = parseFloat(set.weight);
                         const pctOfTM = (tmBase && wNum) ? (wNum / tmBase * 100).toFixed(1).replace(/\.0$/, '') : null;
-                        const hasSubline = pctOfTM || comparison === 'improved' || comparison === 'matched';
 
                         return (
                           <div key={setIdx} className={`space-y-0.5 ${set.completed ? 'border-l-2 border-emerald-500 pl-1.5 -ml-1.5' : ''}`}>
@@ -4486,8 +4710,9 @@ const WorkoutTracker = () => {
                                 </button>
                               ) : <span />}
                             </div>
-                            {hasSubline && (
-                              <div className="grid grid-cols-[2.25rem_1fr_1fr_2rem] gap-2">
+                            {/* Sub-line: always rendered — it carries the warmup toggle and RPE picker,
+                                alongside the optional %TM badge and comparison text. */}
+                            <div className="grid grid-cols-[2.25rem_1fr_1fr_2rem] gap-2">
                                 <span />
                                 <div className="flex items-center gap-2 text-xs">
                                   {pctOfTM && (
@@ -4502,10 +4727,9 @@ const WorkoutTracker = () => {
                                     <span className="text-blue-400" title="Matched previous session">✓ matched</span>
                                   )}
                                 </div>
+                                {warmupRpeControls}
                                 <span />
-                                <span />
-                              </div>
-                            )}
+                            </div>
                           </div>
                         );
                       })}
@@ -4826,62 +5050,64 @@ const WorkoutTracker = () => {
                 {draftSaving ? 'Saving…' : draftSavedAt ? `Saved ${timeAgo(draftSavedAt)}` : ''}
               </span>
             </div>
-            <button
-              onClick={() => {
-                const logKey = `block${currentBlock}-week${currentWeek}-${selectedDay}`;
-                const weekKey = `block${currentBlock}-week${currentWeek}`;
+            {isViewingCurrentBlock && (
+              <button
+                onClick={() => {
+                  const logKey = `block${currentBlock}-week${currentWeek}-${selectedDay}`;
+                  const weekKey = `block${currentBlock}-week${currentWeek}`;
 
-                // Check for PRs in all exercises
-                const allPRs = [];
-                exercises.forEach(exercise => {
-                  const exerciseType = exercise.type || 'strength';
-                  const prs = checkForPRs(exercise.name, exercise.sets, logDate, exerciseType);
-                  allPRs.push(...prs);
+                  // Check for PRs in all exercises
+                  const allPRs = [];
+                  exercises.forEach(exercise => {
+                    const exerciseType = exercise.type || 'strength';
+                    const prs = checkForPRs(exercise.name, performedSets(exercise), logDate, exerciseType);
+                    allPRs.push(...prs);
 
-                  // Update PRs in state
-                  updatePRs(exercise.name, exercise.sets, logDate, logKey, exerciseType);
-                });
+                    // Update PRs in state
+                    updatePRs(exercise.name, performedSets(exercise), logDate, logKey, exerciseType);
+                  });
 
-                // Save workout log — strip UI-only metadata before persisting
-                const exercisesToSave = exercises.map(({ _notesOpen, templateTarget, templatePercentage, pendingTypeChange, templateReps, templateRest, ...ex }) => ({
-                  ...ex,
-                  sets: ex.sets.map(({ weightSource, ...set }) => set)
-                }));
-                setWorkoutLogs({
-                  ...workoutLogs,
-                  [logKey]: {
-                    date: logDate,
-                    exercises: exercisesToSave,
-                    prsHit: allPRs.length
+                  // Save workout log — strip UI-only metadata before persisting
+                  const exercisesToSave = exercises.map(({ _notesOpen, templateTarget, templatePercentage, pendingTypeChange, templateReps, templateRest, ...ex }) => ({
+                    ...ex,
+                    sets: ex.sets.map(({ weightSource, ...set }) => set)
+                  }));
+                  setWorkoutLogs({
+                    ...workoutLogs,
+                    [logKey]: {
+                      date: logDate,
+                      exercises: exercisesToSave,
+                      prsHit: allPRs.length
+                    }
+                  });
+
+                  // The workout is committed — the draft and any running rest timer no longer apply
+                  deleteDraft(logKey);
+                  setDraftSavedAt(null);
+                  stopRestTimer();
+
+                  // Build training-max suggestions from what was just logged (applied only on user confirm)
+                  const suggestions = buildTMSuggestions(exercises);
+                  setTmSuggestions(suggestions);
+                  setTmSuggestSelected(suggestions.reduce((acc, _, i) => { acc[i] = true; return acc; }, {}));
+
+                  // Chain modals: PRs first, then TM suggestions, then back to calendar
+                  if (allPRs.length > 0) {
+                    setNewPRs(allPRs);
+                    setShowPRModal(true);
+                  } else if (suggestions.length > 0) {
+                    setShowTMSuggestModal(true);
+                  } else {
+                    setPrefilled(false);
+                    setView('calendar');
                   }
-                });
-
-                // The workout is committed — the draft and any running rest timer no longer apply
-                deleteDraft(logKey);
-                setDraftSavedAt(null);
-                stopRestTimer();
-
-                // Build training-max suggestions from what was just logged (applied only on user confirm)
-                const suggestions = buildTMSuggestions(exercises);
-                setTmSuggestions(suggestions);
-                setTmSuggestSelected(suggestions.reduce((acc, _, i) => { acc[i] = true; return acc; }, {}));
-
-                // Chain modals: PRs first, then TM suggestions, then back to calendar
-                if (allPRs.length > 0) {
-                  setNewPRs(allPRs);
-                  setShowPRModal(true);
-                } else if (suggestions.length > 0) {
-                  setShowTMSuggestModal(true);
-                } else {
-                  setPrefilled(false);
-                  setView('calendar');
-                }
-              }}
-              className="flex-1 bg-emerald-600 text-white py-3 rounded-lg font-medium hover:bg-emerald-700 flex items-center justify-center gap-2"
-            >
-              <Save className="w-5 h-5" />
-              Save Workout
-            </button>
+                }}
+                className="flex-1 bg-emerald-600 text-white py-3 rounded-lg font-medium hover:bg-emerald-700 flex items-center justify-center gap-2"
+              >
+                <Save className="w-5 h-5" />
+                Save Workout
+              </button>
+            )}
             </div>
           </div>
         )}
