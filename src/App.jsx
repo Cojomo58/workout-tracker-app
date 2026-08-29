@@ -6,6 +6,9 @@ import { supabase } from './supabaseClient';
 
 const DEFAULT_TM_PERCENT = 90;
 
+// Epley is only reliable in low rep ranges; above this a set produces no e1RM estimate at all.
+const E1RM_MAX_REPS = 12;
+
 // All days the Calendar/Template can show, and their display labels.
 const ALL_DAYS = ['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday'];
 const DAY_LABELS = { monday: 'Monday', tuesday: 'Tuesday', wednesday: 'Wednesday', thursday: 'Thursday', friday: 'Friday', saturday: 'Saturday', sunday: 'Sunday' };
@@ -544,7 +547,9 @@ const WorkoutTracker = () => {
             if (!weight || !reps) return;
 
             const volume = weight * reps;
-            const estimated1RM = Math.round(weight * (1 + reps / 30));
+            // Use the shared helper so the E1RM_MAX_REPS cap applies here too — a rebuild must
+            // not resurrect the inflated estimates that live logging now refuses to record.
+            const estimated1RM = calculateEstimated1RM(weight, reps);
 
             // Update max weight
             if (!migratedPRs[exerciseName].maxWeight || weight > migratedPRs[exerciseName].maxWeight.value) {
@@ -562,8 +567,8 @@ const WorkoutTracker = () => {
               migratedPRs[exerciseName][maxRepsKey] = { reps, weight, date: log.date, logKey };
             }
 
-            // Update estimated 1RM
-            if (!migratedPRs[exerciseName].estimated1RM || estimated1RM > migratedPRs[exerciseName].estimated1RM.value) {
+            // Update estimated 1RM (0 means no usable estimate — see checkForPRs)
+            if (estimated1RM > 0 && (!migratedPRs[exerciseName].estimated1RM || estimated1RM > migratedPRs[exerciseName].estimated1RM.value)) {
               migratedPRs[exerciseName].estimated1RM = { value: estimated1RM, date: log.date, logKey, weight, reps };
             }
           });
@@ -1130,6 +1135,7 @@ const WorkoutTracker = () => {
   // Personal Records Functions
   const calculateEstimated1RM = (weight, reps) => {
     if (!weight || !reps || reps < 1) return 0;
+    if (reps > E1RM_MAX_REPS) return 0;
     // Epley formula: 1RM = weight × (1 + reps/30)
     return Math.round(parseFloat(weight) * (1 + parseFloat(reps) / 30));
   };
@@ -1435,8 +1441,9 @@ const WorkoutTracker = () => {
         });
       }
 
-      // Check estimated 1RM
-      if (!currentPRs.estimated1RM || estimated1RM > currentPRs.estimated1RM.value) {
+      // Check estimated 1RM. Sets above E1RM_MAX_REPS yield 0 (Epley isn't reliable that high),
+      // and a 0 is the absence of an estimate — never a PR.
+      if (estimated1RM > 0 && (!currentPRs.estimated1RM || estimated1RM > currentPRs.estimated1RM.value)) {
         prsDetected.push({
           type: 'estimated1RM',
           exerciseName,
@@ -1568,8 +1575,8 @@ const WorkoutTracker = () => {
           updatedPRs[maxRepsKey] = { reps, weight, date: logDate, logKey };
         }
 
-        // Update estimated 1RM
-        if (!updatedPRs.estimated1RM || estimated1RM > updatedPRs.estimated1RM.value) {
+        // Update estimated 1RM (0 means no usable estimate — see checkForPRs)
+        if (estimated1RM > 0 && (!updatedPRs.estimated1RM || estimated1RM > updatedPRs.estimated1RM.value)) {
           updatedPRs.estimated1RM = { value: estimated1RM, date: logDate, logKey, weight, reps };
         }
       });
@@ -1847,12 +1854,15 @@ const WorkoutTracker = () => {
     return date.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
   };
 
-  const getAllExerciseHistory = (exerciseName) => {
+  const getAllExerciseHistory = (exerciseName, excludeLogKey) => {
     const history = [];
+    const target = (exerciseName || '').toLowerCase().trim();
+    if (!target) return history;
     Object.entries(workoutLogs).forEach(([key, log]) => {
+      if (excludeLogKey && key === excludeLogKey) return;
       if (log.date && log.exercises) {
         log.exercises.forEach(ex => {
-          if (ex.name === exerciseName) {
+          if (ex.name && ex.name.toLowerCase().trim() === target) {
             history.push({
               date: log.date,
               sets: ex.sets,
@@ -1867,6 +1877,24 @@ const WorkoutTracker = () => {
     });
     return history.sort((a, b) => new Date(b.date) - new Date(a.date));
   };
+
+  // Reset the Exercise Trend chart's metric to that exercise's type-appropriate default whenever
+  // the selected exercise changes — otherwise chartType can be left on a metric ('e1rm', say) that
+  // doesn't exist for the newly-selected exercise's type, rendering an empty chart with no
+  // highlighted toggle button.
+  React.useEffect(() => {
+    if (!selectedExerciseHistory) return;
+    const history = getAllExerciseHistory(selectedExerciseHistory);
+    const exerciseType = history.length > 0 ? (history[0].type || 'strength') : 'strength';
+    const defaultChartType = {
+      strength: 'e1rm',
+      cardio: 'distance',
+      bodyweight: 'reps',
+      tabata: 'rounds'
+    }[exerciseType] || 'e1rm';
+    setChartType(defaultChartType);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedExerciseHistory]);
 
   // Get all unique exercise names for fuzzy search (deduplicated by case)
   const getAllExerciseNames = useMemo(() => {
@@ -2097,8 +2125,8 @@ const WorkoutTracker = () => {
 
   const isViewingCurrentBlock = currentBlock === highestBlockWithData;
 
-  const getPreviousSession = (exerciseName) => {
-    const history = getAllExerciseHistory(exerciseName);
+  const getPreviousSession = (exerciseName, excludeLogKey) => {
+    const history = getAllExerciseHistory(exerciseName, excludeLogKey);
     // Get the most recent session (first item in sorted array)
     return history.length > 0 ? history[0] : null;
   };
@@ -2178,7 +2206,10 @@ const WorkoutTracker = () => {
 
     if (existingLog) {
       setLogDate(existingLog.date);
-      setExercises(existingLog.exercises);
+      // Deep copy: existingLog.exercises are live references into workoutLogs state, and set-input
+      // handlers mutate exercise/set objects in place after a shallow array copy — without cloning
+      // here, editing a saved workout would mutate workoutLogs directly.
+      setExercises(structuredClone(existingLog.exercises));
       setPrefilled(false);
     } else {
       setLogDate(new Date().toISOString().split('T')[0]);
@@ -2315,7 +2346,7 @@ const WorkoutTracker = () => {
     const nowCompleting = !set.completed;
 
     if (nowCompleting) {
-      const previousSession = getPreviousSession(exercise.name);
+      const previousSession = getPreviousSession(exercise.name, currentLogKey);
       exercise.sets[setIdx] = { ...prefillSetOnComplete(exercise, setIdx, previousSession), completed: true };
     } else {
       exercise.sets[setIdx] = { ...set, completed: false };
@@ -2418,7 +2449,7 @@ const WorkoutTracker = () => {
                 <div className="p-4 bg-emerald-950/30 border border-emerald-900/50 rounded-lg">
                   <p className="text-sm text-gray-400">Workouts (Block)</p>
                   <p className="text-2xl md:text-3xl font-bold text-emerald-400">
-                    {Object.keys(workoutLogs).filter(k => k.startsWith(`block${currentBlock}`)).length}
+                    {Object.keys(workoutLogs).filter(k => k.startsWith(`block${currentBlock}-`)).length}
                   </p>
                 </div>
                 <div className="p-4 bg-blue-950/30 border border-blue-900/50 rounded-lg">
@@ -4022,7 +4053,7 @@ const WorkoutTracker = () => {
 
             <div className="space-y-4">
               {exercises.map((exercise, exIdx) => {
-                const previousSession = getPreviousSession(exercise.name);
+                const previousSession = getPreviousSession(exercise.name, currentLogKey);
                 const currentVolume = calculateVolume(performedSets(exercise));
                 const previousVolume = previousSession ? calculateVolume(performedSets(previousSession)) : 0;
                 const volumeChange = previousVolume > 0
