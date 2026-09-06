@@ -138,11 +138,21 @@ trainingMaxes = {
 ## Training Cycle (Block) Management
 - `currentBlock` (int): Active block number, starts at 1, increments when user starts a new cycle
 - `blockMetadata`: Named cycles with start dates, stored separately from the workout template
-- `highestBlockWithData`: Computed — max block number with any logs or metadata (drives nav caps)
-- `isViewingCurrentBlock`: `currentBlock === highestBlockWithData` — false when browsing history
+- `highestBlockWithData`: Computed — max block number with any logs or metadata
+- `isViewingCurrentBlock`: `currentBlock === highestBlockWithData` — now effectively always true (see below), but the guards it drives are kept
 - Template (`blocks[0]`): Single shared template used across all cycles; users edit it for the next cycle
 - Starting a new block: increments `currentBlock`, resets `currentWeek` to 1, copies no data
-- Past blocks: fully browseable but read-only (empty days non-clickable, Save button hidden)
+
+### Past cycles are not browsable (v2.8)
+- The block navigation row (prev/next chevrons + "Block N" pill) and the amber read-only history banner were **removed** — the Calendar always shows the newest cycle, and only its name is displayed. Week navigation is unaffected.
+- Old blocks' logs are **not deleted**: they remain in localStorage/Supabase and in every export, and PRs still aggregate across all cycles via `getAllExerciseHistory()`. They are simply unreachable in the UI.
+- On load, `currentBlock` is already clamped forward to `highestBlockWithData`, so a stored `current-block` pointing at an old cycle self-corrects.
+- Consequence: `isViewingCurrentBlock` can no longer be false. `getLastPopulatedWeek()` was deleted with the chevrons that were its only caller.
+
+### "Next up" landing (v2.8)
+- `getNextUpSlot(blockNum, logs, template)` (module-level, next to `ALL_DAYS`) returns `{ week, day }` for the training slot **immediately after** the most recently saved workout: it walks forward from the day after the last logged one and returns the first slot that is both unlogged and actually planned in the template, rolling into the next week when a week is finished (last save Friday → next Monday). Falls back to plain weekday order when the template is empty, and caps the scan at 4 weeks so a fully-logged cycle can't spin. No logs in the cycle → `{ week: 1, first planned day }`.
+- Both load paths (`loadFromLocalStorage`, `loadFromCloud`) set `currentWeek` from it, so opening the app lands on the week you're due to train rather than the last week you logged.
+- A `nextUpSlot` memo drives a green **"Next up"** badge + emerald ring on that day's Calendar card. It's derived from `workoutLogs`, so it advances on its own as soon as a workout is saved. The app deliberately does **not** auto-open the log view — that would start the session clock on every app launch.
 
 ## Training Max System (v2.3)
 - Set per-exercise training max: enter true 1RM directly or calculate via Epley formula (weight × reps)
