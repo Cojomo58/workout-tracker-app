@@ -258,6 +258,106 @@ function NumberField({ value, onChange, step = 1, placeholder = '', ariaLabel, m
   );
 }
 
+// Pure formatter (hoisted to module scope so RestTimerBar below can use it too — previously a
+// local const inside WorkoutTracker).
+const formatSecondsToTime = (seconds) => {
+  if (!seconds || seconds <= 0) return '0:00';
+  const hrs = Math.floor(seconds / 3600);
+  const mins = Math.floor((seconds % 3600) / 60);
+  const secs = Math.round(seconds % 60);
+  if (hrs > 0) {
+    return `${hrs}:${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
+  }
+  return `${mins}:${secs.toString().padStart(2, '0')}`;
+};
+
+// Compact rest-timer countdown, rendered either inline under the set row that started it or as a
+// fallback chip in the sticky action bar (see restTimer state/effects in WorkoutTracker). Always
+// renders the tight one-line variant — there is no non-compact caller after the inline-timer
+// change, since the old full-width global bar was removed. `label` is optional: pass the exercise
+// name only where the surrounding UI doesn't already make it obvious (the sticky-bar chip);
+// omit it inline, where the owning set row/card already says which exercise it belongs to.
+function RestTimerBar({ remainingMs, remainingSeconds, running, label, muted, minimal, onAdjust, onPauseResume, onToggleMute, onStop }) {
+  // `minimal` strips the bar down to clock + label + pause/stop for the sticky action bar, where
+  // the full control set wraps into a ~150px-tall block on a phone and swallows the footer. The
+  // fine-grained controls stay available on the inline bar under the owning set row.
+  if (minimal) {
+    return (
+      <div className={`flex items-center gap-1.5 px-2 py-1 rounded-lg border min-w-0 ${remainingMs === 0 ? 'timer-warning border-red-700/50' : 'bg-gray-800 border-gray-700'}`}>
+        <span
+          className={`text-sm font-mono font-bold tabular-nums shrink-0 ${remainingMs === 0 ? 'text-red-400' : remainingSeconds <= 10 ? 'text-red-400 animate-timer-pulse' : 'text-emerald-400'}`}
+        >
+          {formatSecondsToTime(remainingSeconds)}
+        </span>
+        {label && <span className="text-[10px] text-gray-400 truncate hidden sm:inline">{label}</span>}
+        <button
+          onClick={onPauseResume}
+          className="px-1.5 py-0.5 bg-gray-700 hover:bg-gray-600 text-gray-300 text-[10px] rounded shrink-0"
+          title={running ? 'Pause rest timer' : 'Resume rest timer'}
+        >
+          {running ? 'Pause' : 'Resume'}
+        </button>
+        <button
+          onClick={onStop}
+          className="p-1 hover:bg-red-600/20 text-red-400 rounded transition-colors shrink-0"
+          title="Stop rest timer"
+        >
+          <X className="w-3.5 h-3.5" />
+        </button>
+      </div>
+    );
+  }
+
+  return (
+    <div className={`p-2 rounded-lg border flex items-center justify-between gap-2 flex-wrap ${remainingMs === 0 ? 'timer-warning border-red-700/50' : 'bg-gray-800 border-gray-700'}`}>
+      <div className="flex items-center gap-2 min-w-0">
+        <span
+          className={`text-lg font-mono font-bold tabular-nums shrink-0 ${remainingMs === 0 ? 'text-red-400' : remainingSeconds <= 10 ? 'text-red-400 animate-timer-pulse' : 'text-emerald-400'}`}
+        >
+          {formatSecondsToTime(remainingSeconds)}
+        </span>
+        {label && <span className="text-xs text-gray-400 truncate">rest &middot; {label}</span>}
+      </div>
+      <div className="flex items-center gap-2 flex-wrap">
+        <button
+          onClick={() => onAdjust(-15)}
+          className="px-2 py-1 bg-gray-700 hover:bg-gray-600 text-gray-300 text-xs rounded-lg"
+          title="Subtract 15 seconds"
+        >
+          -15s
+        </button>
+        <button
+          onClick={() => onAdjust(15)}
+          className="px-2 py-1 bg-gray-700 hover:bg-gray-600 text-gray-300 text-xs rounded-lg"
+          title="Add 15 seconds"
+        >
+          +15s
+        </button>
+        <button
+          onClick={onPauseResume}
+          className="px-3 py-1 bg-emerald-700 hover:bg-emerald-600 text-white text-xs rounded-lg font-medium"
+        >
+          {running ? 'Pause' : 'Resume'}
+        </button>
+        <button
+          onClick={onToggleMute}
+          className="p-1.5 hover:bg-gray-700 text-gray-400 rounded-lg transition-colors"
+          title={muted ? 'Unmute rest timer sound' : 'Mute rest timer sound'}
+        >
+          {muted ? <VolumeX className="w-4 h-4" /> : <Volume2 className="w-4 h-4" />}
+        </button>
+        <button
+          onClick={onStop}
+          className="p-1.5 hover:bg-red-600/20 text-red-400 rounded-lg transition-colors"
+          title="Stop rest timer"
+        >
+          <X className="w-4 h-4" />
+        </button>
+      </div>
+    </div>
+  );
+}
+
 const WorkoutTracker = () => {
   const [view, setView] = useState('calendar');
   const [currentBlock, setCurrentBlock] = useState(1);
@@ -346,7 +446,7 @@ const WorkoutTracker = () => {
   // Rest Timer — global, timestamp-based (not tick-decremented) so it survives backgrounding
   // without drifting, and persisted to localStorage so it survives a refresh.
   const [restDuration, setRestDuration] = useState(90);
-  const [restTimer, setRestTimer] = useState(null); // { exIdx, exName, endsAt, running, remainingMs }
+  const [restTimer, setRestTimer] = useState(null); // { exIdx, setIdx, exName, endsAt, running, remainingMs }
   const [restMuted, setRestMuted] = useState(() => {
     try { return localStorage.getItem('rest-timer-muted') === 'true'; } catch { return false; }
   });
@@ -383,10 +483,13 @@ const WorkoutTracker = () => {
 
   // exName/durationSeconds let callers (manual button, auto-start-on-set-complete) label the
   // timer and pick a duration without the timer needing to know about the exercise list.
-  const startRestTimer = (exIdx, exName, durationSeconds) => {
+  // setIdx anchors the timer to a specific set row for inline rendering; null = not anchored
+  // to a specific set (used by the manual "Start Rest" button), which falls back to the
+  // sticky-bar chip instead of an inline placement.
+  const startRestTimer = (exIdx, setIdx, exName, durationSeconds) => {
     ensureRestAudioCtx();
     const seconds = durationSeconds ?? restDuration;
-    setRestTimer({ exIdx, exName, endsAt: Date.now() + seconds * 1000, running: true });
+    setRestTimer({ exIdx, setIdx, exName, endsAt: Date.now() + seconds * 1000, running: true });
   };
 
   const pauseResumeRestTimer = () => {
@@ -432,6 +535,53 @@ const WorkoutTracker = () => {
     ? (restTimer.running ? Math.max(0, restTimer.endsAt - Date.now()) : Math.max(0, restTimer.remainingMs ?? 0))
     : 0;
   const restRemainingSeconds = Math.ceil(restRemainingMs / 1000);
+
+  // Session clock — wall-clock anchored like the rest timer above, so backgrounding a tab or
+  // refreshing the page doesn't lose or drift the elapsed time. Auto-starts when a workout day is
+  // opened and stops on Save; `logKey` ties a persisted timer to the day it belongs to so
+  // navigating between days (or away and back) doesn't restart or double-count. `seeded` marks a
+  // timer that was created paused, showing an already-saved log's recorded duration rather than a
+  // live session — it's cleared the moment the user actually interacts (pause/resume/reset).
+  const [sessionTimer, setSessionTimer] = useState(null); // { logKey, startedAt, accumulatedMs, running, seeded }
+  const [sessionTick, setSessionTick] = useState(0);
+
+  const sessionElapsedMs = sessionTimer
+    ? sessionTimer.accumulatedMs + (sessionTimer.running && sessionTimer.startedAt ? Date.now() - sessionTimer.startedAt : 0)
+    : 0;
+
+  // Called from loadDayIntoLogView. Restores an in-progress timer for the same day untouched
+  // (opening the same day again — e.g. after checking Progress mid-workout — must not restart or
+  // reset it), seeds a paused clock showing the recorded duration when the day already has a saved
+  // log, or starts a fresh running clock for a brand-new session.
+  const startSessionFor = (logKey, savedDurationSeconds) => {
+    setSessionTimer(prev => {
+      if (prev && prev.logKey === logKey) return prev;
+      if (savedDurationSeconds != null) {
+        return { logKey, startedAt: null, accumulatedMs: savedDurationSeconds * 1000, running: false, seeded: true };
+      }
+      return { logKey, startedAt: Date.now(), accumulatedMs: 0, running: true, seeded: false };
+    });
+  };
+
+  const pauseResumeSession = () => {
+    setSessionTimer(prev => {
+      if (!prev) return prev;
+      if (prev.running) {
+        return {
+          ...prev,
+          running: false,
+          seeded: false,
+          accumulatedMs: prev.accumulatedMs + (prev.startedAt ? Date.now() - prev.startedAt : 0),
+          startedAt: null
+        };
+      }
+      return { ...prev, running: true, seeded: false, startedAt: Date.now() };
+    });
+  };
+
+  const resetSession = () => {
+    setSessionTimer(prev => prev ? { ...prev, startedAt: Date.now(), accumulatedMs: 0, running: true, seeded: false } : prev);
+  };
 
   // Migrate PRs from historical workout data
   const migrateHistoricalPRs = (logs) => {
@@ -911,17 +1061,63 @@ const WorkoutTracker = () => {
     }, 1000);
 
     return () => clearInterval(id);
-  }, [restTimer?.running, restTimer?.exIdx, restTimer?.endsAt]);
+  }, [restTimer?.running, restTimer?.exIdx, restTimer?.setIdx, restTimer?.endsAt]);
 
   // Recompute immediately when the tab regains visibility — setInterval is throttled/paused while
   // backgrounded, but since remaining is derived from a wall-clock timestamp this just needs a nudge.
+  // Reuses this single listener for the session clock too, rather than registering a second one.
   React.useEffect(() => {
     const onVisibilityChange = () => {
-      if (document.visibilityState === 'visible') setRestTick(t => t + 1);
+      if (document.visibilityState === 'visible') {
+        setRestTick(t => t + 1);
+        setSessionTick(t => t + 1);
+      }
     };
     document.addEventListener('visibilitychange', onVisibilityChange);
     return () => document.removeEventListener('visibilitychange', onVisibilityChange);
   }, []);
+
+  // Session-clock tick — same shape as the rest-timer tick above: just forces a re-render every
+  // second while running so the elapsed display (computed from startedAt/accumulatedMs at render
+  // time, never decremented here) stays live.
+  React.useEffect(() => {
+    if (!sessionTimer || !sessionTimer.running) return;
+    const id = setInterval(() => setSessionTick(t => t + 1), 1000);
+    return () => clearInterval(id);
+  }, [sessionTimer?.running, sessionTimer?.startedAt]);
+
+  // Persist the session clock across refresh/close, restoring it on mount. Unlike the rest timer
+  // (which drops a stale one entirely), a real training session can legitimately run well past an
+  // hour, so a restored RUNNING timer whose elapsed already exceeds 6 hours is restored PAUSED
+  // instead of discarded — the recorded time is still meaningful, it just shouldn't keep silently
+  // climbing in the background.
+  React.useEffect(() => {
+    try {
+      const saved = localStorage.getItem('workout-session-timer');
+      if (!saved) return;
+      const parsed = JSON.parse(saved);
+      if (!parsed || typeof parsed !== 'object') return;
+      if (parsed.running && parsed.startedAt) {
+        const elapsed = parsed.accumulatedMs + (Date.now() - parsed.startedAt);
+        if (elapsed > 6 * 60 * 60 * 1000) {
+          setSessionTimer({ ...parsed, running: false, seeded: false, accumulatedMs: elapsed, startedAt: null });
+          return;
+        }
+      }
+      setSessionTimer(parsed);
+    } catch { /* ignore malformed/unavailable storage */ }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  React.useEffect(() => {
+    try {
+      if (sessionTimer) {
+        localStorage.setItem('workout-session-timer', JSON.stringify(sessionTimer));
+      } else {
+        localStorage.removeItem('workout-session-timer');
+      }
+    } catch { /* ignore quota errors */ }
+  }, [sessionTimer]);
 
   // Persist the rest timer across refresh/close. Restore it on mount, dropping it if stale (the
   // page was closed for more than 10 minutes) rather than showing a wildly wrong countdown.
@@ -1101,16 +1297,7 @@ const WorkoutTracker = () => {
     return parseInt(timeStr) || 0; // Assume seconds
   };
 
-  const formatSecondsToTime = (seconds) => {
-    if (!seconds || seconds <= 0) return '0:00';
-    const hrs = Math.floor(seconds / 3600);
-    const mins = Math.floor((seconds % 3600) / 60);
-    const secs = Math.round(seconds % 60);
-    if (hrs > 0) {
-      return `${hrs}:${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
-    }
-    return `${mins}:${secs.toString().padStart(2, '0')}`;
-  };
+  // formatSecondsToTime is now module-level (hoisted above WorkoutTracker so RestTimerBar can use it too).
 
   const calculatePace = (timeSeconds, distance) => {
     if (!timeSeconds || !distance || distance <= 0) return null;
@@ -2188,6 +2375,10 @@ const WorkoutTracker = () => {
     setSelectedDay(day);
     openedSnapshotRef.current = null;
     setDraftSavedAt(null); // avoid showing the previous day's "Saved Ns ago" until this one autosaves
+    // Start/restore the session clock up front — both the early-return draft-restore branch below
+    // and the normal load path must get it, and re-opening an already-saved day should seed it
+    // paused with the recorded duration rather than starting a fresh running clock.
+    startSessionFor(logKey, workoutLogs[logKey]?.durationSeconds);
 
     if (!skipDraft) {
       const draft = readDrafts()[logKey];
@@ -2359,7 +2550,7 @@ const WorkoutTracker = () => {
 
     if (nowCompleting) {
       const restSeconds = parseRestSeconds(exercise.templateRest) || restDuration;
-      startRestTimer(exIdx, exercise.name, restSeconds);
+      startRestTimer(exIdx, setIdx, exercise.name, restSeconds);
 
       const cardFullyDone = exercise.sets.every(s => s.completed);
       const isTyping = document.activeElement && document.activeElement.tagName === 'INPUT';
@@ -3957,6 +4148,37 @@ const WorkoutTracker = () => {
                     className="px-3 py-2 bg-gray-700 border border-gray-600 rounded-lg text-gray-100 w-full"
                   />
                 </div>
+                {sessionTimer && (() => {
+                  const isRecorded = sessionTimer.seeded && !sessionTimer.running;
+                  return (
+                    <div>
+                      <label className="text-xs text-gray-400 block mb-2">
+                        {isRecorded ? 'Recorded time' : 'Session Time'}
+                      </label>
+                      <div className="flex items-center gap-2">
+                        <span
+                          className={`font-mono text-lg font-bold tabular-nums ${isRecorded ? 'text-gray-400' : 'text-emerald-400'}`}
+                        >
+                          {formatSecondsToTime(Math.round(sessionElapsedMs / 1000))}
+                        </span>
+                        <button
+                          onClick={pauseResumeSession}
+                          className="px-2 py-1 bg-gray-700 hover:bg-gray-600 text-gray-300 text-xs rounded-lg"
+                          title={sessionTimer.running ? 'Pause session timer' : 'Resume session timer'}
+                        >
+                          {sessionTimer.running ? 'Pause' : 'Resume'}
+                        </button>
+                        <button
+                          onClick={resetSession}
+                          className="p-1.5 hover:bg-gray-700 text-gray-400 rounded-lg transition-colors"
+                          title="Reset session timer"
+                        >
+                          <RefreshCw className="w-3.5 h-3.5" />
+                        </button>
+                      </div>
+                    </div>
+                  );
+                })()}
               </div>
             </div>
 
@@ -4503,6 +4725,18 @@ const WorkoutTracker = () => {
                                   </span>
                                 </div>
                               )}
+                              {restTimer && restTimer.exIdx === exIdx && restTimer.setIdx === setIdx && (
+                                <RestTimerBar
+                                  remainingMs={restRemainingMs}
+                                  remainingSeconds={restRemainingSeconds}
+                                  running={restTimer.running}
+                                  muted={restMuted}
+                                  onAdjust={adjustRestTimer}
+                                  onPauseResume={pauseResumeRestTimer}
+                                  onToggleMute={() => setRestMuted(m => !m)}
+                                  onStop={stopRestTimer}
+                                />
+                              )}
                             </div>
                           );
                         }
@@ -4561,6 +4795,18 @@ const WorkoutTracker = () => {
                                 {warmupRpeControls}
                                 <span />
                               </div>
+                              {restTimer && restTimer.exIdx === exIdx && restTimer.setIdx === setIdx && (
+                                <RestTimerBar
+                                  remainingMs={restRemainingMs}
+                                  remainingSeconds={restRemainingSeconds}
+                                  running={restTimer.running}
+                                  muted={restMuted}
+                                  onAdjust={adjustRestTimer}
+                                  onPauseResume={pauseResumeRestTimer}
+                                  onToggleMute={() => setRestMuted(m => !m)}
+                                  onStop={stopRestTimer}
+                                />
+                              )}
                             </div>
                           );
                         }
@@ -4648,6 +4894,18 @@ const WorkoutTracker = () => {
                                   </span>
                                 </div>
                               )}
+                              {restTimer && restTimer.exIdx === exIdx && restTimer.setIdx === setIdx && (
+                                <RestTimerBar
+                                  remainingMs={restRemainingMs}
+                                  remainingSeconds={restRemainingSeconds}
+                                  running={restTimer.running}
+                                  muted={restMuted}
+                                  onAdjust={adjustRestTimer}
+                                  onPauseResume={pauseResumeRestTimer}
+                                  onToggleMute={() => setRestMuted(m => !m)}
+                                  onStop={stopRestTimer}
+                                />
+                              )}
                             </div>
                           );
                         }
@@ -4730,6 +4988,18 @@ const WorkoutTracker = () => {
                                 {warmupRpeControls}
                                 <span />
                             </div>
+                            {restTimer && restTimer.exIdx === exIdx && restTimer.setIdx === setIdx && (
+                              <RestTimerBar
+                                remainingMs={restRemainingMs}
+                                remainingSeconds={restRemainingSeconds}
+                                running={restTimer.running}
+                                muted={restMuted}
+                                onAdjust={adjustRestTimer}
+                                onPauseResume={pauseResumeRestTimer}
+                                onToggleMute={() => setRestMuted(m => !m)}
+                                onStop={stopRestTimer}
+                              />
+                            )}
                           </div>
                         );
                       })}
@@ -4954,86 +5224,40 @@ const WorkoutTracker = () => {
               </button>
             </div>
 
-            {/* Global rest timer — one per session, survives which card is expanded, view changes,
-                backgrounding, and refresh (see restTimer effects above). */}
-            {restTimer ? (
-              <div className={`p-3 rounded-lg border flex items-center justify-between gap-2 flex-wrap ${restRemainingMs === 0 ? 'timer-warning border-red-700/50' : 'bg-gray-800 border-gray-700'}`}>
-                <div className="flex items-center gap-2 min-w-0">
-                  <span
-                    className={`text-2xl font-mono font-bold tabular-nums shrink-0 ${restRemainingMs === 0 ? 'text-red-400' : restRemainingSeconds <= 10 ? 'text-red-400 animate-timer-pulse' : 'text-emerald-400'}`}
-                  >
-                    {formatSecondsToTime(restRemainingSeconds)}
-                  </span>
-                  <span className="text-xs text-gray-400 truncate">rest &middot; {restTimer.exName}</span>
-                </div>
-                <div className="flex items-center gap-2 flex-wrap">
-                  <button
-                    onClick={() => adjustRestTimer(-15)}
-                    className="px-2 py-1 bg-gray-700 hover:bg-gray-600 text-gray-300 text-xs rounded-lg"
-                    title="Subtract 15 seconds"
-                  >
-                    -15s
-                  </button>
-                  <button
-                    onClick={() => adjustRestTimer(15)}
-                    className="px-2 py-1 bg-gray-700 hover:bg-gray-600 text-gray-300 text-xs rounded-lg"
-                    title="Add 15 seconds"
-                  >
-                    +15s
-                  </button>
-                  <button
-                    onClick={pauseResumeRestTimer}
-                    className="px-3 py-1 bg-emerald-700 hover:bg-emerald-600 text-white text-xs rounded-lg font-medium"
-                  >
-                    {restTimer.running ? 'Pause' : 'Resume'}
-                  </button>
-                  <button
-                    onClick={() => setRestMuted(m => !m)}
-                    className="p-1.5 hover:bg-gray-700 text-gray-400 rounded-lg transition-colors"
-                    title={restMuted ? 'Unmute rest timer sound' : 'Mute rest timer sound'}
-                  >
-                    {restMuted ? <VolumeX className="w-4 h-4" /> : <Volume2 className="w-4 h-4" />}
-                  </button>
-                  <button
-                    onClick={stopRestTimer}
-                    className="p-1.5 hover:bg-red-600/20 text-red-400 rounded-lg transition-colors"
-                    title="Stop rest timer"
-                  >
-                    <X className="w-4 h-4" />
-                  </button>
-                </div>
+            {/* Idle "start a rest timer manually" control — only shown when no timer is running.
+                A running timer renders inline under the set row that started it (or, if that
+                row isn't the expanded card, as a chip in the sticky action bar below) instead of
+                a full-width bar here (see restTimer effects above). */}
+            {!restTimer && expandedExIdx != null && exercises[expandedExIdx] && (
+              <div className="flex items-center gap-2 flex-wrap">
+                <button
+                  onClick={() => startRestTimer(
+                    expandedExIdx,
+                    null,
+                    exercises[expandedExIdx].name,
+                    parseRestSeconds(exercises[expandedExIdx].templateRest) || restDuration
+                  )}
+                  className="flex items-center gap-2 px-3 py-1.5 bg-gray-700 hover:bg-gray-600 text-gray-300 text-sm rounded-lg transition-colors"
+                  title={`Start ${restDuration}s rest timer`}
+                >
+                  <Timer className="w-4 h-4" />
+                  Start Rest ({restDuration}s)
+                </button>
+                <button
+                  onClick={() => adjustRestDuration(-15)}
+                  className="px-2 py-1.5 bg-gray-700 hover:bg-gray-600 text-gray-300 text-xs rounded-lg"
+                  title="Decrease default rest duration"
+                >
+                  -15s
+                </button>
+                <button
+                  onClick={() => adjustRestDuration(15)}
+                  className="px-2 py-1.5 bg-gray-700 hover:bg-gray-600 text-gray-300 text-xs rounded-lg"
+                  title="Increase default rest duration"
+                >
+                  +15s
+                </button>
               </div>
-            ) : (
-              expandedExIdx != null && exercises[expandedExIdx] && (
-                <div className="flex items-center gap-2 flex-wrap">
-                  <button
-                    onClick={() => startRestTimer(
-                      expandedExIdx,
-                      exercises[expandedExIdx].name,
-                      parseRestSeconds(exercises[expandedExIdx].templateRest) || restDuration
-                    )}
-                    className="flex items-center gap-2 px-3 py-1.5 bg-gray-700 hover:bg-gray-600 text-gray-300 text-sm rounded-lg transition-colors"
-                    title={`Start ${restDuration}s rest timer`}
-                  >
-                    <Timer className="w-4 h-4" />
-                    Start Rest ({restDuration}s)
-                  </button>
-                  <button
-                    onClick={() => adjustRestDuration(-15)}
-                    className="px-2 py-1.5 bg-gray-700 hover:bg-gray-600 text-gray-300 text-xs rounded-lg"
-                    title="Decrease default rest duration"
-                  >
-                    -15s
-                  </button>
-                  <button
-                    onClick={() => adjustRestDuration(15)}
-                    className="px-2 py-1.5 bg-gray-700 hover:bg-gray-600 text-gray-300 text-xs rounded-lg"
-                    title="Increase default rest duration"
-                  >
-                    +15s
-                  </button>
-                </div>
-              )
             )}
 
             {/* Sticky action bar — keeps Save reachable without hunting past a long exercise list. */}
@@ -5050,6 +5274,28 @@ const WorkoutTracker = () => {
                 {draftSaving ? 'Saving…' : draftSavedAt ? `Saved ${timeAgo(draftSavedAt)}` : ''}
               </span>
             </div>
+            {/* Fallback chip: only needed when the inline bar under the owning set row (see the
+                four set-row branches above) isn't on screen — either the timer belongs to a
+                different (collapsed) exercise card than the one currently expanded, or it was
+                started manually via the idle control above (setIdx null, never anchored to a
+                visible row). When restTimer.exIdx === expandedExIdx with a real setIdx, the
+                inline bar already shows it, so this stays hidden to avoid a duplicate countdown. */}
+            {restTimer && (restTimer.exIdx !== expandedExIdx || restTimer.setIdx == null) && (
+              <div className="min-w-0">
+                <RestTimerBar
+                  minimal
+                  remainingMs={restRemainingMs}
+                  remainingSeconds={restRemainingSeconds}
+                  running={restTimer.running}
+                  label={restTimer.exName}
+                  muted={restMuted}
+                  onAdjust={adjustRestTimer}
+                  onPauseResume={pauseResumeRestTimer}
+                  onToggleMute={() => setRestMuted(m => !m)}
+                  onStop={stopRestTimer}
+                />
+              </div>
+            )}
             {isViewingCurrentBlock && (
               <button
                 onClick={() => {
@@ -5077,14 +5323,17 @@ const WorkoutTracker = () => {
                     [logKey]: {
                       date: logDate,
                       exercises: exercisesToSave,
-                      prsHit: allPRs.length
+                      prsHit: allPRs.length,
+                      durationSeconds: Math.round(sessionElapsedMs / 1000)
                     }
                   });
 
-                  // The workout is committed — the draft and any running rest timer no longer apply
+                  // The workout is committed — the draft, any running rest timer, and the session
+                  // clock no longer apply
                   deleteDraft(logKey);
                   setDraftSavedAt(null);
                   stopRestTimer();
+                  setSessionTimer(null);
 
                   // Build training-max suggestions from what was just logged (applied only on user confirm)
                   const suggestions = buildTMSuggestions(exercises);

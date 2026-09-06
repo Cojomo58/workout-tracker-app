@@ -46,7 +46,8 @@ workoutLogs = {
   "block1-week1-monday": {
     date: "2024-01-15",
     exercises: [{ name, type, sets, notes }],
-    prsHit: 2
+    prsHit: 2,
+    durationSeconds: 3852   // total session length; omitted on logs saved before v2.7
   }
 }
 // Keys always use the pattern: block${currentBlock}-week${weekNum}-${day}
@@ -212,12 +213,19 @@ Logged in:   React State ←→ localStorage (cache) + Supabase (cloud, debounce
 - `toggleSetCompleted(exIdx, setIdx)` (defined near `moveExercise`) handles the toggle: on completion it fills empty fields via `prefillSetOnComplete()` (previous set in the same exercise → template target/%TM → last session's matching set, first non-empty wins), auto-starts the rest timer, and — once every set in the card is done — auto-advances `expandedExIdx` to the next exercise with an incomplete set (skipped if a text input is currently focused).
 - The old "matched previous session" `✓`/`↑` markers still exist but as labeled text (`↑ improved` / `✓ matched`) in the sub-line under the weight field — kept visually distinct from the new completion checkmark.
 
-### Rest timer (v2.6, global + persistent)
-- One rest timer per session, not per exercise. State shape: `{ exIdx, exName, endsAt, running, remainingMs }` — timestamp-based (`endsAt`), not tick-decremented, so backgrounding the tab doesn't cause drift; a 1s interval (`restTick` state) just forces a re-render, and the displayed remaining time is always computed fresh from `endsAt - Date.now()`.
+### Rest timer (v2.7, global + persistent, per-set anchored)
+- One rest timer per session, not per exercise. State shape: `{ exIdx, setIdx, exName, endsAt, running, remainingMs }` — timestamp-based (`endsAt`), not tick-decremented, so backgrounding the tab doesn't cause drift; a 1s interval (`restTick` state) just forces a re-render, and the displayed remaining time is always computed fresh from `endsAt - Date.now()`.
 - Persisted to localStorage key `rest-timer` (written with a `_savedAt` stamp on every change); restored on mount and dropped if `_savedAt` is more than 10 minutes old. Mute preference persisted separately as `rest-timer-muted`.
-- Rendered as a bar directly above the sticky Save Workout footer — visible regardless of which exercise card is expanded, and **not** cleared when leaving the log view (only `Save Workout` calls `stopRestTimer()`). When no timer is running, a manual "Start Rest" control targets whichever exercise is currently expanded.
+- **Per-set placement (v2.7):** `RestTimerBar` (module-level, alongside `formatSecondsToTime`) renders inline directly under the specific set row that started it (`restTimer.exIdx === exIdx && restTimer.setIdx === setIdx`), not as a single global bar. `setIdx` is `null` only for a timer started via the manual "Start Rest" control (not anchored to a set). A fallback chip in the sticky action bar above Save Workout covers the case where the owning set row isn't on screen — the timer belongs to a collapsed exercise card, or has `setIdx == null` — and is suppressed whenever the inline placement is already visible, so the two never show at once. Not cleared when leaving the log view (only `Save Workout` calls `stopRestTimer()`).
 - `parseRestSeconds(restStr)` parses a template `rest` string ("2-3 min", "90 sec") into seconds for auto-start; `templateRest` is threaded through every exercise-construction site (template prefill, last-week prefill, "Use Template", "Load Last Week") alongside the existing `templateReps`/`templateTarget` and is stripped (UI-only) before saving.
 - Completion plays `navigator.vibrate` and a short WebAudio beep (`ensureRestAudioCtx()`/`playRestBeep()`); the AudioContext is created/resumed inside the same click handler that starts the timer (a user gesture) since iOS Safari blocks audio otherwise.
+
+### Session clock (v2.7, wall-clock anchored, auto start/stop)
+- Tracks total time spent on a workout day, separate from the rest timer. State shape: `{ logKey, startedAt, accumulatedMs, running, seeded }`, mirroring the rest timer's wall-clock-anchored approach — elapsed is always `accumulatedMs + (running ? Date.now() - startedAt : 0)`, computed at render, never decremented; a 1s `sessionTick` just forces a re-render, and the rest timer's existing `visibilitychange` listener bumps it too instead of a second listener.
+- **Auto start/stop:** `startSessionFor(logKey, savedDurationSeconds)` runs at the top of `loadDayIntoLogView()` (before its early-return draft-restore branch) — restores an in-progress timer untouched if one already exists for the same `logKey` (so navigating to Progress/History and back doesn't restart or double-count), else seeds a paused clock from `savedDurationSeconds` when reopening a day that already has a saved log, else starts a fresh running clock. Save Workout writes `durationSeconds` onto the log entry and clears the timer (`setSessionTimer(null)`) alongside `deleteDraft()`/`stopRestTimer()`. Deliberately keeps running across view changes (Progress, History, etc.) — only `view !== 'log'` does NOT stop it.
+- Manual `pauseResumeSession()` / `resetSession()` controls sit in the Session Info card (log view) next to the Workout Date field. `seeded` marks a timer created paused-with-a-recorded-duration rather than a live session; it's cleared the moment the user actually pauses, resumes, or resets, so the label only reads "Recorded time" (muted gray) for an untouched reopen of a saved workout — otherwise it reads "Session Time" (live emerald).
+- Persisted to localStorage key `workout-session-timer` on every change, restored on mount. Unlike the rest timer's 10-minute stale-drop, a restored *running* timer whose elapsed already exceeds 6 hours is restored **paused** rather than discarded — a real session can legitimately run over an hour.
+- Not shown on calendar day cards or in Progress stats — display is limited to the Session Info card in the log view, by design.
 
 ### Draft autosave (v2.6)
 - `loadDayIntoLogView(day, { skipDraft })` (near `moveExercise`) is the single entry point for opening a day's log — replaces what used to be an inline calendar-card `onClick`. It checks for an unsaved draft first (unless `skipDraft`), else falls back to the existing saved log, then last-week prefill, then the template.
@@ -237,8 +245,9 @@ Logged in:   React State ←→ localStorage (cache) + Supabase (cloud, debounce
 - `block-metadata`: Named cycle metadata `{ [blockNum]: { name, startDate } }`
 - `training-maxes`: Training max weights `{ [exerciseName]: { true1RM, trainingMaxPercent, trainingMax, lastUpdated } }`
 - `workout-drafts`: In-progress (unsaved) log edits, keyed by logKey — `{ [logKey]: { date, exercises, savedAt } }`; deleted per-key on Save Workout, pruned after 14 days
-- `rest-timer`: The single active rest timer, if any — `{ exIdx, exName, endsAt, running, remainingMs, _savedAt }`; dropped on restore if `_savedAt` is over 10 minutes old
+- `rest-timer`: The single active rest timer, if any — `{ exIdx, setIdx, exName, endsAt, running, remainingMs, _savedAt }`; dropped on restore if `_savedAt` is over 10 minutes old
 - `rest-timer-muted`: `"true"` / `"false"` — rest timer completion sound preference
+- `workout-session-timer`: The active per-day session clock, if any — `{ logKey, startedAt, accumulatedMs, running, seeded }`; cleared on Save Workout; a restored *running* timer over 6 hours elapsed is paused, not dropped
 
 ### Supabase `user_data` Table (when logged in)
 | Column | Type | Purpose |
