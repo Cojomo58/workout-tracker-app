@@ -13,6 +13,39 @@ const E1RM_MAX_REPS = 12;
 const ALL_DAYS = ['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday'];
 const DAY_LABELS = { monday: 'Monday', tuesday: 'Tuesday', wednesday: 'Wednesday', thursday: 'Thursday', friday: 'Friday', saturday: 'Saturday', sunday: 'Sunday' };
 
+// Where the app should land: the training slot immediately after the most recently saved workout.
+// Walks forward from the day after the last logged one and returns the first slot that is both
+// unlogged and actually planned in the template, rolling into the next week when a week is done
+// (last save Friday -> next Monday). Falls back to plain weekday order if the template is empty.
+// Pure and module-level so both the local and cloud load paths can call it before state settles.
+const getNextUpSlot = (blockNum, logs, template = {}) => {
+  const planned = ALL_DAYS.filter(d => template[d]?.exercises?.length > 0);
+  const search = planned.length > 0 ? planned : ALL_DAYS;
+  const hasLog = (w, d) => !!logs[`block${blockNum}-week${w}-${d}`];
+
+  const logged = Object.keys(logs)
+    .map(k => {
+      const m = k.match(new RegExp(`^block${blockNum}-week(\\d+)-(\\w+)$`));
+      return m ? { week: parseInt(m[1]), day: m[2] } : null;
+    })
+    .filter(Boolean);
+
+  // Nothing logged in this cycle yet — start at the top.
+  if (logged.length === 0) return { week: 1, day: search[0] };
+
+  const lastWeek = Math.max(...logged.map(e => e.week));
+  const lastDayIdx = Math.max(...logged.filter(e => e.week === lastWeek).map(e => ALL_DAYS.indexOf(e.day)));
+
+  // Cap the scan at 4 weeks out so a fully-logged cycle can't spin.
+  for (let w = lastWeek; w <= lastWeek + 4; w++) {
+    for (const d of search) {
+      if (w === lastWeek && ALL_DAYS.indexOf(d) <= lastDayIdx) continue;
+      if (!hasLog(w, d)) return { week: w, day: d };
+    }
+  }
+  return { week: lastWeek + 1, day: search[0] };
+};
+
 // --- Exercise-name normalization & similarity (for duplicate detection) ---
 // Common gym abbreviations expanded so "DB Bench Press" matches "Dumbbell Bench Press".
 const EXERCISE_ABBREV = {
@@ -762,7 +795,8 @@ const WorkoutTracker = () => {
       const parsedLogs = logs ? JSON.parse(logs) : {};
 
       setWorkoutLogs(parsedLogs);
-      if (savedBlocks) setBlocks(JSON.parse(savedBlocks));
+      const parsedBlocks = savedBlocks ? JSON.parse(savedBlocks) : null;
+      if (parsedBlocks) setBlocks(parsedBlocks);
 
       const parsedBlockMetadata = savedBlockMetadata ? JSON.parse(savedBlockMetadata) : null;
 
@@ -776,7 +810,8 @@ const WorkoutTracker = () => {
       const storedBlock = savedCurrentBlock ? parseInt(savedCurrentBlock) || 1 : 1;
       const parsedBlock = Math.max(storedBlock, highestBlock);
       setCurrentBlock(parsedBlock);
-      setCurrentWeek(getLastPopulatedWeek(parsedBlock, parsedLogs));
+      // Land on the slot after the last saved workout, not on the last logged week itself.
+      setCurrentWeek(getNextUpSlot(parsedBlock, parsedLogs, parsedBlocks?.[0]?.template).week);
 
       if (parsedBlockMetadata) {
         setBlockMetadata(parsedBlockMetadata);
@@ -813,7 +848,8 @@ const WorkoutTracker = () => {
     if (data.blocks && Array.isArray(data.blocks)) setBlocks(data.blocks);
 
     if (data.current_block) setCurrentBlock(data.current_block);
-    setCurrentWeek(getLastPopulatedWeek(data.current_block || 1, parsedLogs));
+    // Land on the slot after the last saved workout, not on the last logged week itself.
+    setCurrentWeek(getNextUpSlot(data.current_block || 1, parsedLogs, data.blocks?.[0]?.template).week);
 
     if (data.block_metadata && Object.keys(data.block_metadata).length > 0) {
       setBlockMetadata(data.block_metadata);
@@ -2033,6 +2069,13 @@ const WorkoutTracker = () => {
     blocks[0]?.template?.[d] || workoutLogs[`block${currentBlock}-week${currentWeek}-${d}`]
   ), [blocks, workoutLogs, currentBlock, currentWeek]);
 
+  // The slot to pick up on — drives the "Next up" marker on the calendar. Recomputed from
+  // workoutLogs, so it advances on its own the moment a workout is saved.
+  const nextUpSlot = useMemo(
+    () => getNextUpSlot(currentBlock, workoutLogs, blocks[0]?.template),
+    [currentBlock, workoutLogs, blocks]
+  );
+
   const getCurrentTemplate = () => {
     return blocks[0]?.template || {};
   };
@@ -2293,14 +2336,6 @@ const WorkoutTracker = () => {
     return Object.entries(weekTotals)
       .map(([week, volume]) => ({ week: `Wk ${week}`, weekNum: parseInt(week), volume: Math.round(volume) }))
       .sort((a, b) => a.weekNum - b.weekNum);
-  };
-
-  const getLastPopulatedWeek = (blockNum, logs) => {
-    const regex = new RegExp(`^block${blockNum}-week(\\d+)-`);
-    const weeks = Object.keys(logs)
-      .map(k => { const m = k.match(regex); return m ? parseInt(m[1]) : null; })
-      .filter(Boolean);
-    return weeks.length > 0 ? Math.max(...weeks) : 1;
   };
 
   // Highest block number with any data (logs or metadata) — drives block-nav caps and
@@ -3960,46 +3995,15 @@ const WorkoutTracker = () => {
                 </button>
               </div>
 
-              {!isViewingCurrentBlock && (
-                <div className="px-4 py-2 rounded-lg border border-amber-700/40 bg-amber-900/20 text-amber-300 text-sm">
-                  Viewing a past training cycle — read-only. You can look at logged workouts, but empty days can't be opened and new workouts can't be saved here.
-                </div>
-              )}
-
-              {/* Block navigation row */}
+              {/* Current cycle name only. Past-cycle browsing (the block chevrons and the
+                  read-only history banner) was removed deliberately — the app always shows the
+                  newest cycle. Old blocks' logs are NOT deleted: they stay in localStorage/Supabase
+                  and in every export, and PRs still aggregate across all of them via
+                  getAllExerciseHistory(). They're simply not navigable in the UI any more. */}
               <div className="flex items-center justify-between">
                 <h3 className="text-sm font-semibold text-gray-400">
                   {blockMetadata[currentBlock]?.name || `Training Cycle ${currentBlock}`}
                 </h3>
-                <div className="flex gap-2">
-                  <button
-                    onClick={() => {
-                      const newBlock = Math.max(1, currentBlock - 1);
-                      setCurrentBlock(newBlock);
-                      setCurrentWeek(getLastPopulatedWeek(newBlock, workoutLogs));
-                    }}
-                    className="p-2 rounded-lg hover:bg-gray-700 text-gray-300 disabled:opacity-50"
-                    disabled={currentBlock === 1}
-                    title="Previous block"
-                  >
-                    <ChevronLeft className="w-5 h-5" />
-                  </button>
-                  <span className="px-4 py-2 bg-gray-700 rounded-lg text-gray-300 font-medium">
-                    Block {currentBlock}
-                  </span>
-                  <button
-                    onClick={() => {
-                      const newBlock = Math.min(highestBlockWithData, currentBlock + 1);
-                      setCurrentBlock(newBlock);
-                      setCurrentWeek(getLastPopulatedWeek(newBlock, workoutLogs));
-                    }}
-                    disabled={currentBlock >= highestBlockWithData}
-                    className="p-2 rounded-lg hover:bg-gray-700 text-gray-300 disabled:opacity-30"
-                    title="Next block"
-                  >
-                    <ChevronRight className="w-5 h-5" />
-                  </button>
-                </div>
               </div>
 
               {/* Week navigation row */}
@@ -4034,6 +4038,7 @@ const WorkoutTracker = () => {
                 const logKey = `block${currentBlock}-week${currentWeek}-${day}`;
                 const log = workoutLogs[logKey];
                 const isClickable = isViewingCurrentBlock || !!log;
+                const isNextUp = !log && currentWeek === nextUpSlot.week && day === nextUpSlot.day;
 
                 return (
                   <div
@@ -4042,15 +4047,25 @@ const WorkoutTracker = () => {
                     className={`p-4 rounded-lg border transition-all ${
                       log
                         ? 'border-emerald-500 bg-emerald-950/30 hover:bg-emerald-950/50 cursor-pointer'
-                        : isClickable
-                          ? 'border-gray-700 bg-gray-800 hover:bg-gray-750 hover:border-gray-600 cursor-pointer'
-                          : 'border-gray-700 bg-gray-800'
+                        : isNextUp
+                          ? 'border-emerald-500/60 bg-gray-800 ring-1 ring-emerald-500/40 hover:bg-gray-750 cursor-pointer'
+                          : isClickable
+                            ? 'border-gray-700 bg-gray-800 hover:bg-gray-750 hover:border-gray-600 cursor-pointer'
+                            : 'border-gray-700 bg-gray-800'
                     }`}
                   >
                     <div className="flex items-center justify-between">
                       <div className="flex-1">
                         <div className="flex items-center gap-3 mb-1 flex-wrap">
                           <h3 className="font-semibold text-gray-100">{DAY_LABELS[day]}</h3>
+                          {isNextUp && (
+                            <span
+                              className="text-xs font-medium text-emerald-300 bg-emerald-900/40 border border-emerald-700/50 px-2 py-0.5 rounded"
+                              title="Picks up where your last saved workout left off"
+                            >
+                              Next up
+                            </span>
+                          )}
                           {log?.date && (
                             <span className="text-xs text-gray-400 bg-gray-700/50 px-2 py-1 rounded">
                               {formatDate(log.date)}
