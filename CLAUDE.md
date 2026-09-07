@@ -122,7 +122,10 @@ trainingMaxes = {
 - `importData()`: JSON restore with shape validation; backward compatible (v1.x recalculates PRs from logs)
 - `migrateHistoricalPRs()`: Recalculate PRs from workout logs
 - `checkForPRs()`: Detect new PRs during save
-- `updatePRs()`: Persist new PRs
+- `computePRsForExercise(basePRs, name, sets, date, logKey, type)`: Returns a NEW PR map with one exercise folded in — reduce it over a session's exercises (was `updatePRs()`, which called `setPersonalRecords` off a stale closure)
+- `handleSaveWorkout()`: The only path that commits a workout log; verifies the localStorage write before discarding the draft
+- `todayLocalISO()`: Today's LOCAL `YYYY-MM-DD` — use instead of `toISOString().split('T')[0]`, which is UTC
+- `resolveStartWeek()` / `parseLogKey()` / `earliestDateForBlock()` / `readWeekMirror()`: module-level helpers next to `getNextUpSlot`
 - `getAllExerciseHistory()`: Get all-time exercise history across all blocks
 - `getAllExerciseNames()`: Get unique exercise names for fuzzy search
 - `handleAuth()`: Email/password login or signup via Supabase
@@ -138,21 +141,39 @@ trainingMaxes = {
 ## Training Cycle (Block) Management
 - `currentBlock` (int): Active block number, starts at 1, increments when user starts a new cycle
 - `blockMetadata`: Named cycles with start dates, stored separately from the workout template
-- `highestBlockWithData`: Computed — max block number with any logs or metadata
-- `isViewingCurrentBlock`: `currentBlock === highestBlockWithData` — now effectively always true (see below), but the guards it drives are kept
+- `highestBlockWithData`: Computed — max block number with any logs or metadata. Only used to pick the next block number in "New Cycle".
 - Template (`blocks[0]`): Single shared template used across all cycles; users edit it for the next cycle
 - Starting a new block: increments `currentBlock`, resets `currentWeek` to 1, copies no data
+- **Every cycle always has a metadata entry.** Both load paths *merge* seeds into `blockMetadata` rather than replacing it, and an effect creates a missing entry for `currentBlock` (start date inferred from that block's earliest log via `earliestDateForBlock()`). This is load-bearing — see below.
+
+### `isViewingCurrentBlock` was removed (v2.9)
+- It gated both the Save Workout button and calendar-card clickability. Whenever `currentBlock` ran ahead of `highestBlockWithData` the Save button was **not rendered at all**, and since saving is the only way to give a block data, the state was a permanent deadlock — no save → no logs → still hidden.
+- The way in was `loadFromCloud`: it set `currentBlock` from `data.current_block` with no clamp, and when `block_metadata` came back empty it *replaced* the metadata map with a block-1-only seed, deleting the active cycle's entry. The guarded autosave effect then wrote that truncated map back to Supabase.
+- Both are fixed (clamp + merge), but the gate itself is gone: past cycles aren't browsable anyway, so it had nothing left to protect. The Save button is always rendered, `disabled` only when no named exercise exists.
 
 ### Past cycles are not browsable (v2.8)
 - The block navigation row (prev/next chevrons + "Block N" pill) and the amber read-only history banner were **removed** — the Calendar always shows the newest cycle, and only its name is displayed. Week navigation is unaffected.
 - Old blocks' logs are **not deleted**: they remain in localStorage/Supabase and in every export, and PRs still aggregate across all cycles via `getAllExerciseHistory()`. They are simply unreachable in the UI.
-- On load, `currentBlock` is already clamped forward to `highestBlockWithData`, so a stored `current-block` pointing at an old cycle self-corrects.
-- Consequence: `isViewingCurrentBlock` can no longer be false. `getLastPopulatedWeek()` was deleted with the chevrons that were its only caller.
+- On load, `currentBlock` is clamped forward to the highest block with data in **both** paths, so a stored `current-block` pointing at an old cycle self-corrects.
+- `getLastPopulatedWeek()` was deleted with the chevrons that were its only caller.
 
 ### "Next up" landing (v2.8)
 - `getNextUpSlot(blockNum, logs, template)` (module-level, next to `ALL_DAYS`) returns `{ week, day }` for the training slot **immediately after** the most recently saved workout: it walks forward from the day after the last logged one and returns the first slot that is both unlogged and actually planned in the template, rolling into the next week when a week is finished (last save Friday → next Monday). Falls back to plain weekday order when the template is empty, and caps the scan at 4 weeks so a fully-logged cycle can't spin. No logs in the cycle → `{ week: 1, first planned day }`.
-- Both load paths (`loadFromLocalStorage`, `loadFromCloud`) set `currentWeek` from it, so opening the app lands on the week you're due to train rather than the last week you logged.
 - A `nextUpSlot` memo drives a green **"Next up"** badge + emerald ring on that day's Calendar card. It's derived from `workoutLogs`, so it advances on its own as soon as a workout is saved. The app deliberately does **not** auto-open the log view — that would start the session clock on every app launch.
+
+### Week tracking (v2.9)
+- `getNextUpSlot` alone is **not** enough to pick the opening week: it returns week 1 for any cycle with zero logs, so a cycle that hadn't been saved to reopened on Week 1 every time. The week is now persisted.
+- **Where it's stored:** `blockMetadata[blockNum].currentWeek`, so it rides the existing `block_metadata` JSONB column — **no Supabase migration**. A scalar `current-week` localStorage key (`{ block, week }`) mirrors it in case the metadata map is lost. An effect on `[currentBlock, currentWeek, dataLoaded]` writes both; its functional `setBlockMetadata` updater is what keeps it from looping, and it doubles as the self-heal that guarantees an entry for the active cycle.
+- **`resolveStartWeek(blockNum, logs, template, storedWeek, blockWeeks)`** (module-level) is what both load paths call: `Math.max(storedWeek, getNextUpSlot(...).week)`, capped at `Math.max(blockWeeks, nextUp)`. The stored week wins when the cycle has no logs yet; the logs win once they pass it, so the week still advances on its own.
+- `handleSaveWorkout` bumps `currentWeek` to `getNextUpSlot(...)`'s week when a save finishes the week — the header and the "Next up" badge are driven by the same function and can't disagree.
+- The forward chevron caps at `Math.max(blocks[0].weeks || 4, nextUpSlot.week)`, not at the block length alone. The old cap stranded anyone on week 4 of a 4-week block.
+
+### Saving a workout (v2.9)
+- `handleSaveWorkout()` (near `loadDayIntoLogView`) replaced the inline `onClick`. It is still the **only** path that turns a session into a log entry — the autosaved draft is not a save.
+- It **writes `workout-logs` to localStorage and reads it back to verify before deleting the draft.** The old order deleted the draft first and left persistence to a `useEffect` whose `setItem` swallows quota errors, so a failed save destroyed the session while the UI navigated away as if it worked. On failure it re-saves the draft, shows a red notice, and stays in the log view with both timers running.
+- Refuses to save with no named exercise (the button is `disabled` too) — that used to write `exercises: []` and mark the day complete.
+- `updatePRs` became **`computePRsForExercise(basePRs, …)`**, returning a new map instead of calling `setPersonalRecords`. The old version spread the render-time `personalRecords` on every call, and the save handler called it once per exercise in a `forEach` — so **only the last exercise's PRs survived**. The handler now folds it over an accumulator inside one functional `setPersonalRecords`.
+- All dates use module-level **`todayLocalISO()`**, never `toISOString().split('T')[0]` — the latter is UTC, so west of Greenwich an evening workout was stamped the next day while `formatDate()` read it back in local time.
 
 ## Training Max System (v2.3)
 - Set per-exercise training max: enter true 1RM directly or calculate via Epley formula (weight × reps)
@@ -252,9 +273,10 @@ Logged in:   React State ←→ localStorage (cache) + Supabase (cloud, debounce
 - `workout-blocks`: Training block template (single shared template)
 - `personal-records`: All personal records (global, not block-specific)
 - `current-block`: Active block number (integer)
-- `block-metadata`: Named cycle metadata `{ [blockNum]: { name, startDate } }`
+- `current-week`: Scalar mirror of the active week — `{ block, week }`; fallback for when `block-metadata` is lost
+- `block-metadata`: Named cycle metadata `{ [blockNum]: { name, startDate, currentWeek } }` — `currentWeek` is how the active week persists without a Supabase migration
 - `training-maxes`: Training max weights `{ [exerciseName]: { true1RM, trainingMaxPercent, trainingMax, lastUpdated } }`
-- `workout-drafts`: In-progress (unsaved) log edits, keyed by logKey — `{ [logKey]: { date, exercises, savedAt } }`; deleted per-key on Save Workout, pruned after 14 days
+- `workout-drafts`: In-progress (unsaved) log edits, keyed by logKey — `{ [logKey]: { date, exercises, savedAt } }`; deleted per-key on Save Workout, pruned after 60 days (was 14 — a draft is the only copy of an unsaved session). Surfaced on the Calendar as an amber "You have N unsaved workouts" banner listing every draft with no matching log, each with an Open button that jumps to that draft's week
 - `rest-timer`: The single active rest timer, if any — `{ exIdx, setIdx, exName, endsAt, running, remainingMs, _savedAt }`; dropped on restore if `_savedAt` is over 10 minutes old
 - `rest-timer-muted`: `"true"` / `"false"` — rest timer completion sound preference
 - `workout-session-timer`: The active per-day session clock, if any — `{ logKey, startedAt, accumulatedMs, running, seeded }`; cleared on Save Workout; a restored *running* timer over 6 hours elapsed is paused, not dropped
@@ -267,7 +289,7 @@ Logged in:   React State ←→ localStorage (cache) + Supabase (cloud, debounce
 | blocks | JSONB | Training template (shared) |
 | personal_records | JSONB | PR tracking (global) |
 | current_block | INTEGER | Active block number |
-| block_metadata | JSONB | Named cycle info `{ blockNum: { name, startDate } }` |
+| block_metadata | JSONB | Named cycle info `{ blockNum: { name, startDate, currentWeek } }` |
 | training_maxes | JSONB | Training max weights (global, not block-specific) |
 | updated_at | TIMESTAMPTZ | Auto-updated timestamp |
 

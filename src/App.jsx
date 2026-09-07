@@ -46,6 +46,49 @@ const getNextUpSlot = (blockNum, logs, template = {}) => {
   return { week: lastWeek + 1, day: search[0] };
 };
 
+// Today's LOCAL calendar date as YYYY-MM-DD. Deliberately not toISOString(), which is UTC:
+// west of Greenwich an evening workout would be stamped tomorrow, and formatDate() reads the
+// string back in local time, so the off-by-one gets displayed rather than cancelling out.
+const todayLocalISO = () => {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+};
+
+// Split a workout log/draft key back into its parts. Inverse of the
+// `block${n}-week${w}-${day}` pattern used everywhere else.
+const parseLogKey = (key) => {
+  const m = /^block(\d+)-week(\d+)-(\w+)$/.exec(key || '');
+  return m ? { block: parseInt(m[1], 10), week: parseInt(m[2], 10), day: m[3] } : null;
+};
+
+// Earliest workout date recorded in a block, used to seed a missing metadata entry with a
+// plausible start date instead of pretending the cycle began today.
+const earliestDateForBlock = (logs, blockNum) => Object.entries(logs || {})
+  .filter(([k]) => k.startsWith(`block${blockNum}-`))
+  .map(([, v]) => v?.date)
+  .filter(Boolean)
+  .sort()[0] || null;
+
+// Scalar mirror of the active week, so the week survives even if block metadata is lost.
+const readWeekMirror = (blockNum) => {
+  try {
+    const raw = JSON.parse(localStorage.getItem('current-week') || 'null');
+    return raw && raw.block === blockNum ? raw.week : null;
+  } catch { return null; }
+};
+
+// Which week to open on. getNextUpSlot alone returns week 1 for any block with no logs yet,
+// which is how a cycle that hadn't been saved to in a while kept reopening on Week 1 — so the
+// stored week wins whenever it's ahead of what the logs imply, and the logs win once they pass
+// it. The cap admits `next` so a legitimately-week-5 slot is never clamped onto a logged week.
+const resolveStartWeek = (blockNum, logs, template, storedWeek, blockWeeks) => {
+  const next = getNextUpSlot(blockNum, logs, template).week;
+  const stored = parseInt(storedWeek, 10);
+  const week = Number.isFinite(stored) && stored >= 1 ? Math.max(stored, next) : next;
+  const cap = Math.max(1, parseInt(blockWeeks, 10) || 4, next);
+  return Math.min(Math.max(1, week), cap);
+};
+
 // --- Exercise-name normalization & similarity (for duplicate detection) ---
 // Common gym abbreviations expanded so "DB Bench Press" matches "Dumbbell Bench Press".
 const EXERCISE_ABBREV = {
@@ -412,6 +455,8 @@ const WorkoutTracker = () => {
   const [draftSavedAt, setDraftSavedAt] = useState(null);
   const [draftSaving, setDraftSaving] = useState(false);
   const [draftBanner, setDraftBanner] = useState(null); // { savedAt } when a restored draft is showing
+  const [saveNotice, setSaveNotice] = useState(null); // { kind: 'success' | 'error', message }
+  const [draftsVersion, setDraftsVersion] = useState(0); // bumped on every draft write so the calendar banner can react
   const [showExitConfirm, setShowExitConfirm] = useState(false);
   const [footerTick, setFooterTick] = useState(0); // forces the "N min ago" footer text to refresh
   const openedSnapshotRef = useRef(null); // JSON snapshot of exercises/logDate when the day was opened — dirty-checked against
@@ -810,23 +855,23 @@ const WorkoutTracker = () => {
       const storedBlock = savedCurrentBlock ? parseInt(savedCurrentBlock) || 1 : 1;
       const parsedBlock = Math.max(storedBlock, highestBlock);
       setCurrentBlock(parsedBlock);
-      // Land on the slot after the last saved workout, not on the last logged week itself.
-      setCurrentWeek(getNextUpSlot(parsedBlock, parsedLogs, parsedBlocks?.[0]?.template).week);
 
-      if (parsedBlockMetadata) {
-        setBlockMetadata(parsedBlockMetadata);
-      } else {
-        // Seed block 1 metadata — infer start date from earliest log if possible
-        const block1Dates = Object.entries(parsedLogs)
-          .filter(([k]) => k.startsWith('block1-'))
-          .map(([, v]) => v.date)
-          .filter(Boolean)
-          .sort();
-        const startDate = block1Dates[0] || new Date().toISOString().split('T')[0];
-        const seed = { 1: { name: 'Block 1', startDate } };
-        setBlockMetadata(seed);
-        localStorage.setItem('block-metadata', JSON.stringify(seed));
-      }
+      // Seed missing entries rather than replacing the map: a cycle with no metadata entry
+      // drops out of highestBlockWithData, which is what used to strand it as "history".
+      const merged = { ...(parsedBlockMetadata || {}) };
+      [1, parsedBlock].forEach(b => {
+        if (!merged[b]) merged[b] = { name: `Block ${b}`, startDate: earliestDateForBlock(parsedLogs, b) || todayLocalISO() };
+      });
+      setBlockMetadata(merged);
+      localStorage.setItem('block-metadata', JSON.stringify(merged));
+
+      // Land on the week we're actually due to train — the stored week wins over a bare
+      // getNextUpSlot when the cycle has no logs yet, which is what reset people to Week 1.
+      setCurrentWeek(resolveStartWeek(
+        parsedBlock, parsedLogs, parsedBlocks?.[0]?.template,
+        merged[parsedBlock]?.currentWeek ?? readWeekMirror(parsedBlock),
+        parsedBlocks?.[0]?.weeks
+      ));
 
       if (savedPRs) {
         setPersonalRecords(JSON.parse(savedPRs));
@@ -847,22 +892,30 @@ const WorkoutTracker = () => {
     setWorkoutLogs(parsedLogs);
     if (data.blocks && Array.isArray(data.blocks)) setBlocks(data.blocks);
 
-    if (data.current_block) setCurrentBlock(data.current_block);
-    // Land on the slot after the last saved workout, not on the last logged week itself.
-    setCurrentWeek(getNextUpSlot(data.current_block || 1, parsedLogs, data.blocks?.[0]?.template).week);
+    // Clamp forward exactly like the local path. Without this a cloud `current_block` could sit
+    // ahead of every block that has data, which used to hide the Save button outright.
+    const cloudMeta = (data.block_metadata && typeof data.block_metadata === 'object') ? data.block_metadata : {};
+    const fromLogs = Object.keys(parsedLogs)
+      .map(k => parseInt(k.match(/^block(\d+)-/)?.[1])).filter(Boolean);
+    const fromMeta = Object.keys(cloudMeta).map(Number).filter(Boolean);
+    const highestBlock = Math.max(1, ...fromLogs, ...fromMeta);
+    const parsedBlock = Math.max(parseInt(data.current_block, 10) || 1, highestBlock);
+    setCurrentBlock(parsedBlock);
 
-    if (data.block_metadata && Object.keys(data.block_metadata).length > 0) {
-      setBlockMetadata(data.block_metadata);
-    } else {
-      // Seed block 1 metadata from earliest log date
-      const block1Dates = Object.entries(parsedLogs)
-        .filter(([k]) => k.startsWith('block1-'))
-        .map(([, v]) => v.date)
-        .filter(Boolean)
-        .sort();
-      const startDate = block1Dates[0] || new Date().toISOString().split('T')[0];
-      setBlockMetadata({ 1: { name: 'Block 1', startDate } });
-    }
+    // Merge seeds into whatever the cloud returned. The old code REPLACED this map with a
+    // block-1-only seed whenever the column came back empty, deleting the active cycle's entry
+    // — and the autosave effect then wrote that truncated map back to Supabase.
+    const merged = { ...cloudMeta };
+    [1, parsedBlock].forEach(b => {
+      if (!merged[b]) merged[b] = { name: `Block ${b}`, startDate: earliestDateForBlock(parsedLogs, b) || todayLocalISO() };
+    });
+    setBlockMetadata(merged);
+
+    setCurrentWeek(resolveStartWeek(
+      parsedBlock, parsedLogs, data.blocks?.[0]?.template,
+      merged[parsedBlock]?.currentWeek ?? readWeekMirror(parsedBlock),
+      data.blocks?.[0]?.weeks
+    ));
 
     if (data.personal_records && Object.keys(data.personal_records).length > 0) {
       setPersonalRecords(data.personal_records);
@@ -879,8 +932,8 @@ const WorkoutTracker = () => {
       localStorage.setItem('workout-logs', JSON.stringify(parsedLogs));
       localStorage.setItem('workout-blocks', JSON.stringify(data.blocks || []));
       localStorage.setItem('personal-records', JSON.stringify(data.personal_records || {}));
-      if (data.current_block) localStorage.setItem('current-block', JSON.stringify(data.current_block));
-      if (data.block_metadata) localStorage.setItem('block-metadata', JSON.stringify(data.block_metadata));
+      localStorage.setItem('current-block', JSON.stringify(parsedBlock));
+      localStorage.setItem('block-metadata', JSON.stringify(merged));
       if (data.training_maxes) localStorage.setItem('training-maxes', JSON.stringify(data.training_maxes));
     } catch (e) {
       console.error('Error caching to localStorage:', e);
@@ -1014,6 +1067,24 @@ const WorkoutTracker = () => {
       }
     }
   }, [blockMetadata, dataLoaded]);
+
+  // Remember which week this cycle is on. Stored inside the block's metadata entry so it rides
+  // the existing block_metadata JSONB column (no Supabase migration), plus a scalar mirror so
+  // the week survives even if that map is lost. The functional updater means this effect does
+  // not depend on blockMetadata and cannot loop — it returns `prev` untouched when unchanged.
+  // It also self-heals a missing entry for the active cycle, which is what kept
+  // highestBlockWithData behind currentBlock and made the Save button disappear.
+  React.useEffect(() => {
+    if (!dataLoaded) return;
+    setBlockMetadata(prev => {
+      const entry = prev[currentBlock] || { name: `Block ${currentBlock}`, startDate: todayLocalISO() };
+      if (entry.currentWeek === currentWeek) return prev;
+      return { ...prev, [currentBlock]: { ...entry, currentWeek } };
+    });
+    try {
+      localStorage.setItem('current-week', JSON.stringify({ block: currentBlock, week: currentWeek }));
+    } catch { /* quota — the metadata copy is the source of truth anyway */ }
+  }, [currentBlock, currentWeek, dataLoaded]);
 
   // Debounced save to Supabase
   const upsertToSupabase = useCallback(async () => {
@@ -1197,12 +1268,17 @@ const WorkoutTracker = () => {
     } catch { return {}; }
   };
 
+  // Single chokepoint for every draft write, so bumping draftsVersion here is enough to make
+  // the (non-reactive) localStorage drafts observable by the calendar's recovery banner.
   const writeDraftsObject = (drafts) => {
     try { localStorage.setItem('workout-drafts', JSON.stringify(drafts)); } catch { /* quota exceeded — drop silently */ }
+    setDraftsVersion(v => v + 1);
   };
 
   const pruneOldDrafts = (drafts) => {
-    const cutoff = Date.now() - 14 * 24 * 60 * 60 * 1000;
+    // 60 days, not 14: a draft is the only copy of an unsaved session, and a silent two-week
+    // delete is how one disappears while the user is still trying to get it committed.
+    const cutoff = Date.now() - 60 * 24 * 60 * 60 * 1000;
     const next = {};
     Object.entries(drafts).forEach(([k, v]) => { if (v?.savedAt && v.savedAt >= cutoff) next[k] = v; });
     return next;
@@ -1236,8 +1312,26 @@ const WorkoutTracker = () => {
     const minutes = Math.round(seconds / 60);
     if (minutes < 60) return `${minutes} min ago`;
     const hours = Math.round(minutes / 60);
-    return `${hours}h ago`;
+    if (hours < 24) return `${hours}h ago`;
+    const days = Math.round(hours / 24);
+    return days === 1 ? 'yesterday' : `${days} days ago`;
   };
+
+  // Clear a success notice on its own; errors stay until dismissed.
+  React.useEffect(() => {
+    if (saveNotice?.kind !== 'success') return;
+    const t = setTimeout(() => setSaveNotice(null), 4000);
+    return () => clearTimeout(t);
+  }, [saveNotice]);
+
+  // Drafts that were never committed — the sessions a user would call "lost". Keyed off
+  // draftsVersion because localStorage isn't reactive.
+  const uncommittedDrafts = useMemo(() => Object.entries(readDrafts())
+    .map(([key, d]) => ({ key, ...parseLogKey(key), ...d }))
+    .filter(d => d.block && !workoutLogs[d.key] && d.exercises?.length > 0)
+    .sort((a, b) => (b.savedAt || 0) - (a.savedAt || 0)),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [workoutLogs, draftsVersion]);
 
   // Prune stale drafts once on mount
   React.useEffect(() => {
@@ -1397,7 +1491,7 @@ const WorkoutTracker = () => {
       const existing = prev[exerciseName];
       const prevHistory = existing?.history || [];
       const newHistory = existing
-        ? [...prevHistory, { true1RM: existing.true1RM, trainingMax: existing.trainingMax, date: existing.lastUpdated || new Date().toISOString().split('T')[0] }]
+        ? [...prevHistory, { true1RM: existing.true1RM, trainingMax: existing.trainingMax, date: existing.lastUpdated || todayLocalISO() }]
         : prevHistory;
       return {
         ...prev,
@@ -1405,7 +1499,7 @@ const WorkoutTracker = () => {
           true1RM: parseFloat(true1RM),
           trainingMaxPercent: parseFloat(pct),
           trainingMax: deriveTrainingMax(true1RM, pct),
-          lastUpdated: new Date().toISOString().split('T')[0],
+          lastUpdated: todayLocalISO(),
           history: newHistory
         }
       };
@@ -1682,8 +1776,12 @@ const WorkoutTracker = () => {
     return prsDetected;
   };
 
-  const updatePRs = (exerciseName, sets, logDate, logKey, exerciseType = 'strength') => {
-    const currentPRs = personalRecords[exerciseName] || {};
+  // Returns a NEW personal-records map with this exercise folded in. Takes the base map as an
+  // argument rather than reading `personalRecords` from the closure so it can be reduced over
+  // every exercise in a session — the old version spread the render-time state on each call,
+  // so saving a 5-exercise workout kept only the last exercise's PRs.
+  const computePRsForExercise = (basePRs, exerciseName, sets, logDate, logKey, exerciseType = 'strength') => {
+    const currentPRs = basePRs[exerciseName] || {};
     const updatedPRs = { ...currentPRs };
 
     if (exerciseType === 'cardio') {
@@ -1805,10 +1903,7 @@ const WorkoutTracker = () => {
       });
     }
 
-    setPersonalRecords({
-      ...personalRecords,
-      [exerciseName]: updatedPRs
-    });
+    return { ...basePRs, [exerciseName]: updatedPRs };
   };
 
   // Chart Data Formatting
@@ -1904,7 +1999,7 @@ const WorkoutTracker = () => {
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
-      a.download = `workout-tracker-backup-${new Date().toISOString().split('T')[0]}.json`;
+      a.download = `workout-tracker-backup-${todayLocalISO()}.json`;
       document.body.appendChild(a);
       a.click();
       document.body.removeChild(a);
@@ -2059,6 +2154,7 @@ const WorkoutTracker = () => {
     localStorage.removeItem('workout-blocks');
     localStorage.removeItem('personal-records');
     localStorage.removeItem('current-block');
+    localStorage.removeItem('current-week');
     localStorage.removeItem('block-metadata');
     localStorage.removeItem('training-maxes');
   };
@@ -2348,7 +2444,12 @@ const WorkoutTracker = () => {
     return Math.max(1, ...fromLogs, ...fromMeta);
   }, [workoutLogs, blockMetadata]);
 
-  const isViewingCurrentBlock = currentBlock === highestBlockWithData;
+  // A workout needs at least one named exercise to be worth logging — otherwise Save would
+  // write `exercises: []` and the calendar would show the day as completed.
+  const hasSaveableExercise = useMemo(
+    () => exercises.some(ex => ex.name && String(ex.name).trim()),
+    [exercises]
+  );
 
   const getPreviousSession = (exerciseName, excludeLogKey) => {
     const history = getAllExerciseHistory(exerciseName, excludeLogKey);
@@ -2403,10 +2504,111 @@ const WorkoutTracker = () => {
     setExpandedExIdx(prev => (prev === idx ? targetIdx : prev === targetIdx ? idx : prev));
   };
 
+  // Commits the workout currently in the log view. This is the ONLY path that turns a session
+  // into a real log entry — the autosaved draft is not a save — so it deliberately proves the
+  // write landed before throwing anything away. Previously it deleted the draft up front and
+  // left persistence to a useEffect that swallows quota errors, so a failed save destroyed the
+  // session while the UI navigated away as if it had worked.
+  const handleSaveWorkout = () => {
+    if (!selectedDay) return;
+
+    const cleaned = exercises.filter(ex => ex.name && String(ex.name).trim());
+    if (cleaned.length === 0) {
+      setSaveNotice({ kind: 'error', message: 'Add at least one named exercise before saving.' });
+      return;
+    }
+
+    const logKey = `block${currentBlock}-week${currentWeek}-${selectedDay}`;
+    const date = logDate || todayLocalISO();
+
+    const allPRs = [];
+    cleaned.forEach(exercise => {
+      allPRs.push(...checkForPRs(exercise.name, performedSets(exercise), date, exercise.type || 'strength'));
+    });
+
+    // Strip UI-only metadata before persisting
+    const exercisesToSave = cleaned.map(({ _notesOpen, templateTarget, templatePercentage, pendingTypeChange, templateReps, templateRest, ...ex }) => ({
+      ...ex,
+      sets: ex.sets.map(({ weightSource, ...set }) => set)
+    }));
+    const entry = {
+      date,
+      exercises: exercisesToSave,
+      prsHit: allPRs.length,
+      durationSeconds: Math.round(sessionElapsedMs / 1000)
+    };
+    const nextLogs = { ...workoutLogs, [logKey]: entry };
+
+    try {
+      // Write and read back. A quota failure has to surface HERE, while the draft is still
+      // intact, rather than in the effect that catches and console.errors it.
+      localStorage.setItem('workout-logs', JSON.stringify(nextLogs));
+      const verify = JSON.parse(localStorage.getItem('workout-logs') || '{}');
+      if (!verify[logKey] || !Array.isArray(verify[logKey].exercises)
+          || verify[logKey].exercises.length !== exercisesToSave.length) {
+        throw new Error('Workout did not persist to local storage');
+      }
+    } catch (err) {
+      console.error('Error saving workout:', err);
+      saveDraftNow(); // make sure the session is on disk before telling the user anything failed
+      setSaveNotice({
+        kind: 'error',
+        message: "Couldn't save — your device storage may be full. Your workout is kept as a draft; free up space and press Save again."
+      });
+      return; // draft kept, PRs not recorded, timers still running, no navigation
+    }
+
+    // Functional updates: the old closure spreads dropped concurrent changes, and folding PRs
+    // over an accumulator is what makes every exercise's PRs survive instead of just the last.
+    setWorkoutLogs(prev => ({ ...prev, [logKey]: entry }));
+    setPersonalRecords(prev => cleaned.reduce(
+      (acc, ex) => computePRsForExercise(acc, ex.name, performedSets(ex), date, logKey, ex.type || 'strength'),
+      prev
+    ));
+
+    // Committed — the draft, the rest timer and the session clock no longer apply.
+    deleteDraft(logKey);
+    setDraftSavedAt(null);
+    setDraftBanner(null);
+    stopRestTimer();
+    setSessionTimer(null);
+    // Re-baseline the dirty check so closing a just-saved workout doesn't prompt to save it again
+    openedSnapshotRef.current = JSON.stringify({ exercises, logDate });
+
+    // Roll the calendar forward when this save finished the week, so the header and the
+    // "Next up" badge (both driven by getNextUpSlot) can't disagree about where you are.
+    const slot = getNextUpSlot(currentBlock, nextLogs, blocks[0]?.template);
+    if (slot.week > currentWeek) setCurrentWeek(slot.week);
+
+    setSaveNotice({
+      kind: 'success',
+      message: `Saved ${DAY_LABELS[selectedDay]} · Week ${currentWeek} · ${formatDate(date)}`
+    });
+
+    // Build training-max suggestions from what was just logged (applied only on user confirm)
+    const suggestions = buildTMSuggestions(cleaned);
+    setTmSuggestions(suggestions);
+    setTmSuggestSelected(suggestions.reduce((acc, _, i) => { acc[i] = true; return acc; }, {}));
+
+    // Chain modals: PRs first, then TM suggestions, then back to calendar
+    if (allPRs.length > 0) {
+      setNewPRs(allPRs);
+      setShowPRModal(true);
+    } else if (suggestions.length > 0) {
+      setShowTMSuggestModal(true);
+    } else {
+      setPrefilled(false);
+      setView('calendar');
+    }
+  };
+
   // Opens a day's log: restores an in-progress draft if one exists (unless skipDraft, used by
   // "Start fresh"), else loads the saved log, else prefills from last week or the template.
-  const loadDayIntoLogView = (day, { skipDraft = false } = {}) => {
-    const logKey = `block${currentBlock}-week${currentWeek}-${day}`;
+  // `week` lets the unsaved-drafts banner jump straight to a draft sitting in another week;
+  // it's batched with setView so the log view — and the save it produces — lands on that week.
+  const loadDayIntoLogView = (day, { skipDraft = false, week = currentWeek } = {}) => {
+    const logKey = `block${currentBlock}-week${week}-${day}`;
+    if (week !== currentWeek) setCurrentWeek(week);
     setSelectedDay(day);
     openedSnapshotRef.current = null;
     setDraftSavedAt(null); // avoid showing the previous day's "Saved Ns ago" until this one autosaves
@@ -2418,7 +2620,7 @@ const WorkoutTracker = () => {
     if (!skipDraft) {
       const draft = readDrafts()[logKey];
       if (draft) {
-        setLogDate(draft.date || new Date().toISOString().split('T')[0]);
+        setLogDate(draft.date || todayLocalISO());
         setExercises(draft.exercises || []);
         setPrefilled(false);
         setDraftBanner({ savedAt: draft.savedAt });
@@ -2441,11 +2643,11 @@ const WorkoutTracker = () => {
       setExercises(structuredClone(existingLog.exercises));
       setPrefilled(false);
     } else {
-      setLogDate(new Date().toISOString().split('T')[0]);
+      setLogDate(todayLocalISO());
 
       // Auto-populate from previous week's same day
-      const prevWeekKey = currentWeek > 1
-        ? `block${currentBlock}-week${currentWeek - 1}-${day}`
+      const prevWeekKey = week > 1
+        ? `block${currentBlock}-week${week - 1}-${day}`
         : null;
       const prevWeekLog = prevWeekKey ? workoutLogs[prevWeekKey] : null;
 
@@ -2456,7 +2658,7 @@ const WorkoutTracker = () => {
           const tmplEx = templateExercises.find(t => t.name === ex.name);
 
           // If template has a weekly progression for this week, use it to set weight
-          const weekOverride = tmplEx?.weeklyProgression?.find(w => w.week === currentWeek) ?? null;
+          const weekOverride = tmplEx?.weeklyProgression?.find(w => w.week === week) ?? null;
           const effectivePct  = weekOverride?.percentage ?? null;
           const effectiveSets = weekOverride?.sets ?? null;
           const effectiveReps = weekOverride?.reps ?? null;
@@ -2499,8 +2701,8 @@ const WorkoutTracker = () => {
         setExercises(workout?.exercises.map(ex => {
           const exType = ex.type || 'strength';
 
-          // Apply weekly progression override if one exists for currentWeek
-          const weekOverride = ex.weeklyProgression?.find(w => w.week === currentWeek) ?? null;
+          // Apply weekly progression override if one exists for the week being opened
+          const weekOverride = ex.weeklyProgression?.find(w => w.week === week) ?? null;
           const effectivePct  = weekOverride?.percentage  ?? ex.percentage;
           const effectiveSets = weekOverride?.sets        ?? ex.sets;
           const effectiveReps = weekOverride?.reps        ?? ex.reps;
@@ -3946,6 +4148,7 @@ const WorkoutTracker = () => {
                     setCurrentBlock(1);
                     setBlockMetadata({});
                     setCurrentWeek(1);
+                    try { localStorage.removeItem('current-week'); } catch { /* ignore */ }
                   }
                 }}
                 className="px-4 py-2 bg-red-900/30 hover:bg-red-900/50 text-red-400 border border-red-800/40 rounded-lg text-sm"
@@ -3982,8 +4185,10 @@ const WorkoutTracker = () => {
                   onClick={() => {
                     if (!window.confirm("Start a new training cycle? You'll return to Week 1.")) return;
                     const newBlockNum = Math.max(currentBlock, highestBlockWithData) + 1;
-                    const today = new Date().toISOString().split('T')[0];
-                    setBlockMetadata({ ...blockMetadata, [newBlockNum]: { name: `Block ${newBlockNum}`, startDate: today } });
+                    setBlockMetadata(prev => ({
+                      ...prev,
+                      [newBlockNum]: { name: `Block ${newBlockNum}`, startDate: todayLocalISO(), currentWeek: 1 }
+                    }));
                     setCurrentBlock(newBlockNum);
                     setCurrentWeek(1);
                   }}
@@ -4020,9 +4225,12 @@ const WorkoutTracker = () => {
                   <span className="px-4 py-2 bg-gray-700 rounded-lg text-gray-300 font-medium">
                     Week {currentWeek}
                   </span>
+                  {/* Cap matches resolveStartWeek's, so every week the app can land on is a week
+                      you can navigate to. The old cap was the block length, which defaults to 4
+                      — that stranded anyone training a fifth week. */}
                   <button
                     onClick={() => setCurrentWeek(currentWeek + 1)}
-                    disabled={currentWeek >= (blocks[0]?.weeks || 52)}
+                    disabled={currentWeek >= Math.max(blocks[0]?.weeks || 4, nextUpSlot.week)}
                     className="p-2 rounded-lg hover:bg-gray-700 text-gray-300 disabled:opacity-30"
                   >
                     <ChevronRight className="w-5 h-5" />
@@ -4031,27 +4239,76 @@ const WorkoutTracker = () => {
               </div>
             </div>
 
+            {/* Sessions that were typed in but never committed. Without this they're only
+                reachable by guessing the right week, and they expire silently. */}
+            {uncommittedDrafts.length > 0 && (
+              <div className="p-3 bg-amber-950/30 border border-amber-800/50 rounded-lg space-y-2">
+                <div className="flex items-center gap-2">
+                  <History className="w-4 h-4 text-amber-400 shrink-0" />
+                  <span className="text-sm font-medium text-amber-300">
+                    {uncommittedDrafts.length === 1 ? 'You have an unsaved workout' : `You have ${uncommittedDrafts.length} unsaved workouts`}
+                  </span>
+                </div>
+                <p className="text-xs text-amber-200/70">
+                  These were autosaved as drafts but never logged — open one and press Save Workout to keep it.
+                </p>
+                {uncommittedDrafts.slice(0, 5).map(d => (
+                  <div key={d.key} className="flex items-center justify-between gap-2 p-2 bg-gray-900/40 rounded-lg flex-wrap">
+                    <div className="min-w-0">
+                      <div className="text-sm text-gray-200 truncate">
+                        {DAY_LABELS[d.day] || d.day}
+                        <span className="text-gray-400"> · Week {d.week}</span>
+                        {d.block !== currentBlock && <span className="text-gray-500"> · Cycle {d.block}</span>}
+                      </div>
+                      <div className="text-xs text-gray-500">
+                        {d.exercises.length} exercise{d.exercises.length === 1 ? '' : 's'} · saved {timeAgo(d.savedAt)}
+                      </div>
+                    </div>
+                    <div className="flex items-center gap-2 shrink-0">
+                      <button
+                        onClick={() => loadDayIntoLogView(d.day, { week: d.week })}
+                        className="px-3 py-1.5 bg-amber-700 hover:bg-amber-600 text-white rounded-lg text-xs font-medium"
+                        title="Open this draft so you can save it"
+                      >
+                        Open
+                      </button>
+                      <button
+                        onClick={() => {
+                          if (!window.confirm(`Discard the unsaved ${DAY_LABELS[d.day] || d.day} draft? This can't be undone.`)) return;
+                          deleteDraft(d.key);
+                        }}
+                        className="p-1.5 text-gray-500 hover:text-red-400"
+                        title="Discard this draft"
+                      >
+                        <Trash2 className="w-4 h-4" />
+                      </button>
+                    </div>
+                  </div>
+                ))}
+                {uncommittedDrafts.length > 5 && (
+                  <p className="text-xs text-amber-200/60">+{uncommittedDrafts.length - 5} more</p>
+                )}
+              </div>
+            )}
+
             <div className="grid gap-3">
               {visibleDays.map((day) => {
                 const template = getCurrentTemplate();
                 const workout = template[day];
                 const logKey = `block${currentBlock}-week${currentWeek}-${day}`;
                 const log = workoutLogs[logKey];
-                const isClickable = isViewingCurrentBlock || !!log;
                 const isNextUp = !log && currentWeek === nextUpSlot.week && day === nextUpSlot.day;
 
                 return (
                   <div
                     key={day}
-                    onClick={() => { if (isClickable) loadDayIntoLogView(day); }}
+                    onClick={() => loadDayIntoLogView(day)}
                     className={`p-4 rounded-lg border transition-all ${
                       log
                         ? 'border-emerald-500 bg-emerald-950/30 hover:bg-emerald-950/50 cursor-pointer'
                         : isNextUp
                           ? 'border-emerald-500/60 bg-gray-800 ring-1 ring-emerald-500/40 hover:bg-gray-750 cursor-pointer'
-                          : isClickable
-                            ? 'border-gray-700 bg-gray-800 hover:bg-gray-750 hover:border-gray-600 cursor-pointer'
-                            : 'border-gray-700 bg-gray-800'
+                          : 'border-gray-700 bg-gray-800 hover:bg-gray-750 hover:border-gray-600 cursor-pointer'
                     }`}
                   >
                     <div className="flex items-center justify-between">
@@ -4134,7 +4391,9 @@ const WorkoutTracker = () => {
               <div className="flex items-center justify-between p-3 bg-blue-950/30 border border-blue-800/50 rounded-lg flex-wrap gap-2">
                 <div className="flex items-center gap-2">
                   <History className="w-4 h-4 text-blue-400" />
-                  <span className="text-sm text-blue-300">Restored unsaved draft from {timeAgo(draftBanner.savedAt)}</span>
+                  <span className="text-sm text-blue-300">
+                    Restored unsaved draft from {timeAgo(draftBanner.savedAt)} — press Save Workout to log it
+                  </span>
                 </div>
                 <button
                   onClick={() => {
@@ -4162,6 +4421,13 @@ const WorkoutTracker = () => {
                     onChange={(e) => setLogDate(e.target.value)}
                     className="px-3 py-2 bg-gray-700 border border-gray-600 rounded-lg text-gray-100 w-full"
                   />
+                  {/* A restored draft carries the date it was started on. Saving it weeks later
+                      would otherwise silently file the workout under that old date. */}
+                  {draftBanner && logDate && logDate !== todayLocalISO() && (
+                    <p className="text-xs text-amber-400 mt-1.5">
+                      This draft is dated {formatDate(logDate)}, not today — change it above if that's wrong.
+                    </p>
+                  )}
                 </div>
                 {sessionTimer && (() => {
                   const isRecorded = sessionTimer.seeded && !sessionTimer.running;
@@ -5285,8 +5551,13 @@ const WorkoutTracker = () => {
                   return totalSets > 0 ? `${doneSets}/${totalSets} sets` : null;
                 })()}
               </span>
-              <span className="truncate max-w-[7rem] sm:max-w-none">
-                {draftSaving ? 'Saving…' : draftSavedAt ? `Saved ${timeAgo(draftSavedAt)}` : ''}
+              {/* Says "Draft", never "Saved". This sits inches from the Save button, and reading
+                  it as "already saved" is exactly how a finished session goes unlogged. */}
+              <span
+                className="truncate max-w-[7rem] sm:max-w-none text-amber-500/80"
+                title="Autosaved draft — the workout isn't logged until you press Save Workout"
+              >
+                {draftSaving ? 'Saving draft…' : draftSavedAt ? `Draft · ${timeAgo(draftSavedAt)}` : ''}
               </span>
             </div>
             {/* Fallback chip: only needed when the inline bar under the owning set row (see the
@@ -5311,71 +5582,48 @@ const WorkoutTracker = () => {
                 />
               </div>
             )}
-            {isViewingCurrentBlock && (
-              <button
-                onClick={() => {
-                  const logKey = `block${currentBlock}-week${currentWeek}-${selectedDay}`;
-                  const weekKey = `block${currentBlock}-week${currentWeek}`;
-
-                  // Check for PRs in all exercises
-                  const allPRs = [];
-                  exercises.forEach(exercise => {
-                    const exerciseType = exercise.type || 'strength';
-                    const prs = checkForPRs(exercise.name, performedSets(exercise), logDate, exerciseType);
-                    allPRs.push(...prs);
-
-                    // Update PRs in state
-                    updatePRs(exercise.name, performedSets(exercise), logDate, logKey, exerciseType);
-                  });
-
-                  // Save workout log — strip UI-only metadata before persisting
-                  const exercisesToSave = exercises.map(({ _notesOpen, templateTarget, templatePercentage, pendingTypeChange, templateReps, templateRest, ...ex }) => ({
-                    ...ex,
-                    sets: ex.sets.map(({ weightSource, ...set }) => set)
-                  }));
-                  setWorkoutLogs({
-                    ...workoutLogs,
-                    [logKey]: {
-                      date: logDate,
-                      exercises: exercisesToSave,
-                      prsHit: allPRs.length,
-                      durationSeconds: Math.round(sessionElapsedMs / 1000)
-                    }
-                  });
-
-                  // The workout is committed — the draft, any running rest timer, and the session
-                  // clock no longer apply
-                  deleteDraft(logKey);
-                  setDraftSavedAt(null);
-                  stopRestTimer();
-                  setSessionTimer(null);
-
-                  // Build training-max suggestions from what was just logged (applied only on user confirm)
-                  const suggestions = buildTMSuggestions(exercises);
-                  setTmSuggestions(suggestions);
-                  setTmSuggestSelected(suggestions.reduce((acc, _, i) => { acc[i] = true; return acc; }, {}));
-
-                  // Chain modals: PRs first, then TM suggestions, then back to calendar
-                  if (allPRs.length > 0) {
-                    setNewPRs(allPRs);
-                    setShowPRModal(true);
-                  } else if (suggestions.length > 0) {
-                    setShowTMSuggestModal(true);
-                  } else {
-                    setPrefilled(false);
-                    setView('calendar');
-                  }
-                }}
-                className="flex-1 bg-emerald-600 text-white py-3 rounded-lg font-medium hover:bg-emerald-700 flex items-center justify-center gap-2"
-              >
-                <Save className="w-5 h-5" />
-                Save Workout
-              </button>
-            )}
+            {/* Always rendered. This used to be wrapped in `isViewingCurrentBlock &&`, which meant
+                that whenever currentBlock ran ahead of every block with data the button silently
+                vanished — and since saving is the only way to give a block data, the state was a
+                permanent deadlock. Past cycles aren't browsable any more (v2.8), so the gate had
+                nothing left to protect. It's disabled-with-a-reason instead of absent. */}
+            <button
+              onClick={handleSaveWorkout}
+              disabled={!hasSaveableExercise}
+              title={hasSaveableExercise ? 'Log this workout' : 'Add an exercise before saving'}
+              className="flex-1 bg-emerald-600 text-white py-3 rounded-lg font-medium hover:bg-emerald-700 flex items-center justify-center gap-2 disabled:bg-gray-700 disabled:text-gray-500 disabled:cursor-not-allowed"
+            >
+              <Save className="w-5 h-5" />
+              Save Workout
+            </button>
             </div>
           </div>
         )}
       </div>
+
+      {/* Save outcome. Success auto-clears; an error stays until dismissed — a failed save is
+          exactly the case where a toast that disappears would leave the user thinking it worked. */}
+      {saveNotice && (
+        <div className="fixed top-4 left-1/2 -translate-x-1/2 z-[60] px-4 w-full max-w-md">
+          <div className={`flex items-start gap-3 p-3 rounded-lg border shadow-lg ${
+            saveNotice.kind === 'success'
+              ? 'bg-emerald-950/95 border-emerald-700 text-emerald-200'
+              : 'bg-red-950/95 border-red-700 text-red-200'
+          }`}>
+            {saveNotice.kind === 'success'
+              ? <Check className="w-5 h-5 shrink-0 mt-0.5" />
+              : <X className="w-5 h-5 shrink-0 mt-0.5" />}
+            <span className="text-sm flex-1">{saveNotice.message}</span>
+            <button
+              onClick={() => setSaveNotice(null)}
+              className="shrink-0 text-current opacity-60 hover:opacity-100"
+              title="Dismiss"
+            >
+              <X className="w-4 h-4" />
+            </button>
+          </div>
+        </div>
+      )}
 
       {/* Exit-guard modal — shown from the log view's X when there are unsaved edits */}
       {showExitConfirm && (
