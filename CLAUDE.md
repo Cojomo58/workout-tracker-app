@@ -34,8 +34,9 @@ Custom theme tokens (gold/volume colors, pr-bounce/timer-pulse animations) live 
 ### Training Cycle Metadata
 ```javascript
 blockMetadata = {
-  1: { name: "Spring 2025 Hypertrophy", startDate: "2025-01-15" },
-  2: { name: "Summer Cut", startDate: "2025-04-01" }
+  1: { name: "Spring 2025 Hypertrophy", startDate: "2025-01-15", currentWeek: 3,
+       trainingMaxSnapshot: { "Bench Press": { true1RM: 236, trainingMax: 212.5, trainingMaxPercent: 90 } } },
+  2: { name: "Summer Cut", startDate: "2025-04-01", currentWeek: 1, trainingMaxSnapshot: { ... } }
 }
 // currentBlock: integer — which block is active (1-N)
 ```
@@ -136,7 +137,13 @@ trainingMaxes = {
 - `roundToNearest2_5()`: Round weight to nearest 2.5 lb increment
 - `deriveTrainingMax(true1RM, pct)`: Calculate training max from 1RM and percentage
 - `getPercentageWeight(exerciseName, percentage)`: Get auto-fill weight for a given TM%
-- `saveTrainingMax(exerciseName, true1RM, pct)`: Save/update a training max entry
+- `saveTrainingMax(exerciseName, true1RM, pct)`: Save/update a training max entry (wraps `foldTrainingMax`)
+- `foldTrainingMax(prevMap, name, true1RM, pct, today)`: Module-level, pure — returns a NEW TM map with one entry folded in; lets the cycle rollover build a whole map synchronously
+- `lookupTrainingMax(name)` / `resolveTMKey(name, tmLink, tmKeys)`: Tolerant TM lookup (exact → case-insensitive) and full resolution (`tmLink` → exact → case-insensitive → fuzzy)
+- `buildCycleRolloverSuggestions(blockNum)`: What every trained exercise's TM should become next cycle — `{ rows, untrained }`, writes nothing
+- `startNewCycle(rowsToApply)`: The only path that advances a cycle; applies confirmed TMs and snapshots both cycles
+- `cycleIncrementFor(name)`: +10 lb lower body / +5 lb upper body standard cycle bump
+- `snapshotTrainingMaxes(tmMap)`: Strip a TM map down to the per-cycle record stored on `blockMetadata`
 
 ## Training Cycle (Block) Management
 - `currentBlock` (int): Active block number, starts at 1, increments when user starts a new cycle
@@ -188,6 +195,20 @@ trainingMaxes = {
 - `getBest1RM(exerciseName)`: returns `true1RM` from trainingMaxes if set, else estimated1RM from PRs
 - Weekly progression / 5/3/1 scheme removed — simple single `% of TM` per exercise only
 - **Auto-TM suggestions (suggest, don't auto-apply):** on Save Workout, `buildTMSuggestions()` computes the best Epley 1RM per strength exercise and proposes creating a new TM (if none) or raising an existing one (if the new 1RM is higher). Suggestions surface in a purple confirmation modal (after the PR modal, if any) with per-item checkboxes; nothing is written until the user clicks "Apply Selected". A suggestion resolves to an existing TM via exact name match, then `findSimilarExercise()` against TM keys — so logging "DB Bench" updates the "Dumbbell Bench Press" TM instead of creating a duplicate.
+
+### Cycle Rollover (v3.0)
+- **The problem it solves:** template weights are derived from `trainingMax`, so a cycle programmed at 65% kept auto-filling the same 212 lb forever. `buildTMSuggestions()` only fires per-save and only on a new 1RM, so an exercise trained hard without a PR never moved. Starting a new cycle now rolls the training maxes forward, which is what makes each cycle heavier than the last.
+- **"New Cycle" now goes through `handleNewCycleClick()`** (near `startNewCycle`), not an inline `onClick`. It builds the rollover rows first: if there are any, the purple **Roll Training Maxes Forward** modal replaces the old `window.confirm`; if there are none (an untrained cycle), the plain confirm still applies.
+- **`buildCycleRolloverSuggestions(blockNum)`** returns `{ rows, untrained }` and never writes state. Per strength exercise trained in the finishing cycle (`getCycleTrainedExercises()`, which scans `block{N}-week*` keys through `performedSets`):
+  - best cycle e1RM beats the stored `true1RM` → `reason: 'pr'`, TM follows the new 1RM;
+  - trained but no new e1RM → `reason: 'increment'`, TM moves by `cycleIncrementFor(name)` (**+10 lb lower body / +5 lb upper**, matched against `normalizeExerciseTokens` so "BB Squats" and "rdl" classify), with `newTrue1RM` back-derived from the target TM so the stored pair stays consistent;
+  - no TM yet **and** the template programs that exercise by a percentage → `reason: 'new'`.
+  - A TM with **no logged work in the cycle is left alone** and only counted in `untrained` — bumping a lift you did not train is not progression. `E1RM_MAX_REPS = 12` means a pure hypertrophy cycle yields mostly `'increment'` rows; that is correct, not a bug.
+- **`startNewCycle(rowsToApply)`** is the only path that advances a cycle. It folds every confirmed row through the module-level **`foldTrainingMax()`** into one `nextTMs` map and writes it with a single `setTrainingMaxes` — a loop of `saveTrainingMax` calls could not be snapshotted, since those values only exist inside React's updater queue.
+- **Per-cycle snapshots:** the same `setBlockMetadata` update stores `trainingMaxSnapshot` (via `snapshotTrainingMaxes()`, which drops `history`) on both the finishing block (pre-apply values, never overwriting an existing snapshot) and the new one (post-apply). Rides the existing `block_metadata` JSONB column — **no migration**, and export/import carry it for free. The `trainingMaxByCycle` memo reads them back into a `C1 212.5 → C2 230` line on each Progress → Training Maxes card (consecutive equal values collapse).
+- **Modal:** clone of the TM-suggestion modal with per-row checkboxes *and* an editable New TM field per row; an edited TM is back-derived into a 1RM on apply. **Skip** starts the cycle changing nothing.
+- **Shared resolution:** `resolveTMKey(name, tmLink, tmKeys)` (`tmLink` → exact → case-insensitive → `findSimilarExercise`) is now used by both `buildTMSuggestions()` and the rollover, so the per-save and per-cycle paths agree. `lookupTrainingMax()` gives `getPercentageWeight()`/`getBest1RM()` the same case-insensitive fallback the log-view %TM badge always had — without it a template exercise spelled "bench press" silently auto-filled nothing against a "Bench Press" TM.
+- `roundToNearest2_5`, `deriveTrainingMax`, `foldTrainingMax`, `cycleIncrementFor` and `snapshotTrainingMaxes` are **module-level and pure** (top of App.jsx, next to `performedSets`); `saveTrainingMax` is now a one-line wrapper over `foldTrainingMax`.
 
 ## First-Run Onboarding (v2.5)
 - The default template is blank: `createEmptyBlock()` (module-level, defined above `WorkoutTracker`) returns a single block with all 5 weekdays present but empty (`name: '', exercises: []`). This is the initial `blocks` state, and what "Reset to Default Template" / "Full Reset" restore — nothing in the app ships with any individual's personal workout data baked in.
@@ -274,7 +295,7 @@ Logged in:   React State ←→ localStorage (cache) + Supabase (cloud, debounce
 - `personal-records`: All personal records (global, not block-specific)
 - `current-block`: Active block number (integer)
 - `current-week`: Scalar mirror of the active week — `{ block, week }`; fallback for when `block-metadata` is lost
-- `block-metadata`: Named cycle metadata `{ [blockNum]: { name, startDate, currentWeek } }` — `currentWeek` is how the active week persists without a Supabase migration
+- `block-metadata`: Named cycle metadata `{ [blockNum]: { name, startDate, currentWeek, trainingMaxSnapshot } }` — `currentWeek` and `trainingMaxSnapshot` both ride this map so neither needs a Supabase migration
 - `training-maxes`: Training max weights `{ [exerciseName]: { true1RM, trainingMaxPercent, trainingMax, lastUpdated } }`
 - `workout-drafts`: In-progress (unsaved) log edits, keyed by logKey — `{ [logKey]: { date, exercises, savedAt } }`; deleted per-key on Save Workout, pruned after 60 days (was 14 — a draft is the only copy of an unsaved session). Surfaced on the Calendar as an amber "You have N unsaved workouts" banner listing every draft with no matching log, each with an Open button that jumps to that draft's week
 - `rest-timer`: The single active rest timer, if any — `{ exIdx, setIdx, exName, endsAt, running, remainingMs, _savedAt }`; dropped on restore if `_savedAt` is over 10 minutes old
@@ -289,7 +310,7 @@ Logged in:   React State ←→ localStorage (cache) + Supabase (cloud, debounce
 | blocks | JSONB | Training template (shared) |
 | personal_records | JSONB | PR tracking (global) |
 | current_block | INTEGER | Active block number |
-| block_metadata | JSONB | Named cycle info `{ blockNum: { name, startDate, currentWeek } }` |
+| block_metadata | JSONB | Named cycle info `{ blockNum: { name, startDate, currentWeek, trainingMaxSnapshot } }` |
 | training_maxes | JSONB | Training max weights (global, not block-specific) |
 | updated_at | TIMESTAMPTZ | Auto-updated timestamp |
 
