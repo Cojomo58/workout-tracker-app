@@ -153,6 +153,51 @@ const performedSets = (exercise) => {
   return sets.filter(s => !s.warmup && (!anyCompleted || s.completed));
 };
 
+// Weight rounding and training-max derivation. Module-level and pure so the cycle-rollover
+// builder can compute an entire TM map synchronously, outside a setState updater.
+const roundToNearest2_5 = (w) => Math.round(w / 2.5) * 2.5;
+
+const deriveTrainingMax = (true1RM, pct) =>
+  roundToNearest2_5(parseFloat(true1RM) * parseFloat(pct) / 100);
+
+// Fold one training max into a TM map and return a NEW map. `history` is append-only and holds
+// PREVIOUS values, so history[0] stays the oldest entry (the Progress delta line depends on that).
+const foldTrainingMax = (prevMap, exerciseName, true1RM, pct, today) => {
+  const existing = prevMap[exerciseName];
+  const prevHistory = existing?.history || [];
+  const newHistory = existing
+    ? [...prevHistory, { true1RM: existing.true1RM, trainingMax: existing.trainingMax, date: existing.lastUpdated || today }]
+    : prevHistory;
+  return {
+    ...prevMap,
+    [exerciseName]: {
+      true1RM: parseFloat(true1RM),
+      trainingMaxPercent: parseFloat(pct),
+      trainingMax: deriveTrainingMax(true1RM, pct),
+      lastUpdated: today,
+      history: newHistory
+    }
+  };
+};
+
+// Standard cycle increment for an exercise that produced no new e1RM. Lower body moves in bigger
+// jumps than upper body -- the usual 5/3/1 convention. Matched against normalized tokens so
+// "BB Squats" and "rdl" (-> romanian deadlift) both classify.
+const LOWER_BODY_KEYWORDS = new Set([
+  'squat', 'deadlift', 'lunge', 'thrust', 'calf', 'calve', 'leg', 'hamstring',
+  'glute', 'hip', 'step', 'morning'
+]);
+const cycleIncrementFor = (name) =>
+  normalizeExerciseTokens(name).some(t => LOWER_BODY_KEYWORDS.has(t)) ? 10 : 5;
+
+// The TM values a cycle is run at, stored on blockMetadata so past cycles keep their own numbers.
+// `history` is deliberately dropped: a snapshot is a point-in-time record, not a log.
+const snapshotTrainingMaxes = (tmMap) =>
+  Object.entries(tmMap || {}).reduce((acc, [name, tm]) => {
+    acc[name] = { true1RM: tm.true1RM, trainingMax: tm.trainingMax, trainingMaxPercent: tm.trainingMaxPercent };
+    return acc;
+  }, {});
+
 function ExerciseTypeBadge({ type }) {
   const styles = {
     cardio: 'bg-blue-900/50 text-blue-400',
@@ -493,6 +538,13 @@ const WorkoutTracker = () => {
   const [tmSuggestions, setTmSuggestions] = useState([]);
   const [showTMSuggestModal, setShowTMSuggestModal] = useState(false);
   const [tmSuggestSelected, setTmSuggestSelected] = useState({}); // index -> bool
+
+  // Cycle rollover (shown when starting a new cycle; user confirms before any TM is written)
+  const [rolloverSuggestions, setRolloverSuggestions] = useState([]);
+  const [showRolloverModal, setShowRolloverModal] = useState(false);
+  const [rolloverSelected, setRolloverSelected] = useState({}); // index -> bool
+  const [rolloverEdits, setRolloverEdits] = useState({});       // index -> edited training max
+  const [rolloverUntrained, setRolloverUntrained] = useState(0); // TMs with no work logged this cycle
 
   // Duplicate-exercise merge tool (Manage Exercises): clusterKey -> chosen keeper name
   const [mergeKeeper, setMergeKeeper] = useState({});
@@ -1457,21 +1509,27 @@ const WorkoutTracker = () => {
     return Math.round(parseFloat(weight) * (1 + parseFloat(reps) / 30));
   };
 
-  // Training Max utility functions
-  const roundToNearest2_5 = (w) => Math.round(w / 2.5) * 2.5;
+  // Training Max utility functions. roundToNearest2_5 / deriveTrainingMax are module-level (pure).
 
-  const deriveTrainingMax = (true1RM, pct) =>
-    roundToNearest2_5(parseFloat(true1RM) * parseFloat(pct) / 100);
+  // Resolve a TM by exact key, then case-insensitively -- a template exercise spelled "bench press"
+  // must still find the "Bench Press" TM, or its % of TM silently auto-fills nothing.
+  const lookupTrainingMax = (exerciseName) => {
+    if (!exerciseName) return null;
+    const exact = trainingMaxes[exerciseName];
+    if (exact) return exact;
+    const target = String(exerciseName).toLowerCase().trim();
+    return Object.entries(trainingMaxes).find(([k]) => k.toLowerCase().trim() === target)?.[1] || null;
+  };
 
   const getPercentageWeight = (exerciseName, percentage) => {
-    const tm = trainingMaxes[exerciseName];
+    const tm = lookupTrainingMax(exerciseName);
     if (!tm || !percentage) return null;
     return roundToNearest2_5(tm.trainingMax * percentage / 100);
   };
 
   // Get the best available 1RM for an exercise (explicit TM > estimated 1RM from PRs)
   const getBest1RM = (exerciseName) => {
-    const tm = trainingMaxes[exerciseName];
+    const tm = lookupTrainingMax(exerciseName);
     if (tm) return tm.true1RM;
     const pr = personalRecords[exerciseName]?.estimated1RM?.value;
     return pr || null;
@@ -1483,27 +1541,11 @@ const WorkoutTracker = () => {
     if (!pct) return null;
     const base = getBest1RM(exerciseName);
     if (!base) return null;
-    return { weight: roundToNearest2_5(base * pct / 100), pct, source: trainingMaxes[exerciseName] ? 'tm' : 'e1rm' };
+    return { weight: roundToNearest2_5(base * pct / 100), pct, source: lookupTrainingMax(exerciseName) ? 'tm' : 'e1rm' };
   };
 
   const saveTrainingMax = (exerciseName, true1RM, pct = DEFAULT_TM_PERCENT) => {
-    setTrainingMaxes(prev => {
-      const existing = prev[exerciseName];
-      const prevHistory = existing?.history || [];
-      const newHistory = existing
-        ? [...prevHistory, { true1RM: existing.true1RM, trainingMax: existing.trainingMax, date: existing.lastUpdated || todayLocalISO() }]
-        : prevHistory;
-      return {
-        ...prev,
-        [exerciseName]: {
-          true1RM: parseFloat(true1RM),
-          trainingMaxPercent: parseFloat(pct),
-          trainingMax: deriveTrainingMax(true1RM, pct),
-          lastUpdated: todayLocalISO(),
-          history: newHistory
-        }
-      };
-    });
+    setTrainingMaxes(prev => foldTrainingMax(prev, exerciseName, true1RM, pct, todayLocalISO()));
   };
 
   // Rep-to-TM-percentage lookup (standard powerlifting percentage chart)
@@ -2315,6 +2357,18 @@ const WorkoutTracker = () => {
     return Array.from(groups.values()).filter(g => g.length > 1);
   }, [allKnownExerciseNames]);
 
+  // Which TM an exercise maps to: its explicit link, then an exact name, then a case-insensitive
+  // name, then a similar existing TM (so "DB Bench" updates "Dumbbell Bench Press" rather than
+  // creating a duplicate). Returns the TM key, or null when nothing matches.
+  const resolveTMKey = (name, tmLink, tmKeys) => {
+    if (tmLink && tmKeys.includes(tmLink)) return tmLink;
+    const target = String(name || '').toLowerCase().trim();
+    if (!target) return null;
+    const exact = tmKeys.find(k => k.toLowerCase().trim() === target);
+    if (exact) return exact;
+    return findSimilarExercise(name, tmKeys)?.name || null;
+  };
+
   // Build training-max suggestions from the strength exercises just logged.
   // Never writes state — returns a list the user confirms in a modal.
   const buildTMSuggestions = (exerciseList) => {
@@ -2331,12 +2385,7 @@ const WorkoutTracker = () => {
       });
       if (!best1RM) return;
 
-      // Resolve which TM this exercise maps to: exact match, else a similar existing TM (avoids duplicate TM entries).
-      let targetKey = tmKeys.find(k => k.toLowerCase().trim() === ex.name.toLowerCase().trim());
-      if (!targetKey) {
-        const similar = findSimilarExercise(ex.name, tmKeys);
-        if (similar) targetKey = similar.name;
-      }
+      const targetKey = resolveTMKey(ex.name, ex.tmLink, tmKeys);
       const resolvedKey = targetKey || ex.name;
       if (usedKeys.has(resolvedKey.toLowerCase())) return; // one suggestion per TM per save
       const existing = targetKey ? trainingMaxes[targetKey] : null;
@@ -2351,6 +2400,178 @@ const WorkoutTracker = () => {
       }
     });
     return suggestions;
+  };
+
+  // Every strength exercise trained in one cycle, with its best estimated 1RM across that cycle.
+  // bestE1RM stays 0 when every set was above E1RM_MAX_REPS -- the exercise was still trained, so
+  // it is still eligible for the standard increment.
+  const getCycleTrainedExercises = (blockNum) => {
+    const prefix = `block${blockNum}-week`;
+    const trained = {};
+    Object.entries(workoutLogs).forEach(([key, log]) => {
+      if (!key.startsWith(prefix)) return;
+      (log.exercises || []).forEach(ex => {
+        if ((ex.type || 'strength') !== 'strength' || !ex.name) return;
+        const k = ex.name.toLowerCase().trim();
+        if (!trained[k]) trained[k] = { name: ex.name, tmLink: ex.tmLink || null, bestE1RM: 0, weight: 0, reps: 0, date: log.date };
+        if (ex.tmLink && !trained[k].tmLink) trained[k].tmLink = ex.tmLink;
+        performedSets(ex).forEach(set => {
+          const e1rm = calculateEstimated1RM(set.weight, set.reps);
+          if (e1rm > trained[k].bestE1RM) {
+            trained[k].bestE1RM = e1rm;
+            trained[k].weight = parseFloat(set.weight);
+            trained[k].reps = parseFloat(set.reps);
+            trained[k].date = log.date;
+          }
+        });
+      });
+    });
+    return trained;
+  };
+
+  // Exercises the template programs by % of TM, keyed by the TM they would look up. Only these are
+  // worth proposing a brand-new TM for: without one, their percentage auto-fills nothing.
+  const templatePercentageTargets = useMemo(() => {
+    const targets = new Set();
+    Object.values(blocks[0]?.template || {}).forEach(day => {
+      (day.exercises || []).forEach(ex => {
+        if (!ex.name) return;
+        const hasPct = ex.percentage || (ex.weeklyProgression || []).some(w => w.percentage);
+        if (hasPct) targets.add(String(ex.tmLink || ex.name).toLowerCase().trim());
+      });
+    });
+    return targets;
+  }, [blocks]);
+
+  // Training-max progression across cycles, read back from the per-cycle snapshots on
+  // blockMetadata. Consecutive cycles at the same TM collapse, so each entry marks the cycle a
+  // value took effect in.
+  const trainingMaxByCycle = useMemo(() => {
+    const byName = {};
+    Object.entries(blockMetadata)
+      .map(([b, meta]) => [Number(b), meta])
+      .filter(([b, meta]) => b && meta && meta.trainingMaxSnapshot)
+      .sort((a, b) => a[0] - b[0])
+      .forEach(([b, meta]) => {
+        Object.entries(meta.trainingMaxSnapshot).forEach(([name, snap]) => {
+          const k = name.toLowerCase().trim();
+          if (!byName[k]) byName[k] = [];
+          const last = byName[k][byName[k].length - 1];
+          if (!last || last.trainingMax !== snap.trainingMax) byName[k].push({ block: b, trainingMax: snap.trainingMax });
+        });
+      });
+    return byName;
+  }, [blockMetadata]);
+
+  // What each training max should become now that a cycle is finishing. Beat your old 1RM and the
+  // TM follows the new one; train it without a PR and it still moves by the standard increment --
+  // that is what makes the next cycle heavier than the last. Never writes state: the user confirms
+  // in a modal first.
+  const buildCycleRolloverSuggestions = (blockNum) => {
+    const tmKeys = Object.keys(trainingMaxes);
+    const trained = getCycleTrainedExercises(blockNum);
+    const rows = [];
+    const used = new Set();
+    const matchedTMKeys = new Set();
+
+    Object.values(trained).forEach(t => {
+      const targetKey = resolveTMKey(t.name, t.tmLink, tmKeys);
+      const resolvedKey = targetKey || t.name;
+      if (used.has(resolvedKey.toLowerCase())) return; // one row per TM per rollover
+      const existing = targetKey ? trainingMaxes[targetKey] : null;
+      const pct = existing?.trainingMaxPercent || DEFAULT_TM_PERCENT;
+      const base = {
+        targetKey: resolvedKey,
+        exerciseName: t.name,
+        pct,
+        weight: t.weight,
+        reps: t.reps,
+        bestE1RM: t.bestE1RM,
+        currentTrue1RM: existing?.true1RM ?? null,
+        currentTrainingMax: existing?.trainingMax ?? null,
+        matchedByName: !!targetKey && targetKey.toLowerCase().trim() !== t.name.toLowerCase().trim()
+      };
+
+      let row;
+      if (!existing) {
+        // A brand-new TM is only useful where the template actually programs a percentage.
+        if (!t.bestE1RM || !templatePercentageTargets.has(resolvedKey.toLowerCase().trim())) return;
+        row = { ...base, reason: 'new', increment: 0, newTrue1RM: t.bestE1RM };
+      } else if (t.bestE1RM > existing.true1RM) {
+        row = { ...base, reason: 'pr', increment: 0, newTrue1RM: t.bestE1RM };
+      } else {
+        const increment = cycleIncrementFor(targetKey);
+        row = { ...base, reason: 'increment', increment, newTrue1RM: Math.round((existing.trainingMax + increment) * 100 / pct) };
+      }
+      // Derive the TM exactly the way saving will, so the modal shows what actually gets stored.
+      row.newTrainingMax = deriveTrainingMax(row.newTrue1RM, pct);
+      rows.push(row);
+      used.add(resolvedKey.toLowerCase());
+      if (targetKey) matchedTMKeys.add(targetKey);
+    });
+
+    const order = { pr: 0, new: 1, increment: 2 };
+    rows.sort((a, b) => (order[a.reason] - order[b.reason]) || a.targetKey.localeCompare(b.targetKey));
+    // Training maxes that saw no work this cycle are deliberately left alone.
+    return { rows, untrained: tmKeys.filter(k => !matchedTMKeys.has(k)).length };
+  };
+
+  // Advance to the next cycle, applying the confirmed training-max changes as one write.
+  // Both the finishing and the new cycle keep a snapshot of the TMs they were run at, so a past
+  // cycle's percentages stay attributable to the numbers that were actually in effect.
+  const startNewCycle = (rowsToApply = []) => {
+    const finishing = currentBlock;
+    const newBlockNum = Math.max(currentBlock, highestBlockWithData) + 1;
+    const today = todayLocalISO();
+    const beforeTMs = trainingMaxes;
+    const nextTMs = rowsToApply.reduce(
+      (acc, r) => foldTrainingMax(acc, r.targetKey, r.newTrue1RM, r.pct, today),
+      beforeTMs
+    );
+    if (rowsToApply.length > 0) setTrainingMaxes(nextTMs);
+
+    setBlockMetadata(prev => {
+      const finishingEntry = prev[finishing] || {
+        name: `Block ${finishing}`,
+        startDate: earliestDateForBlock(workoutLogs, finishing) || today
+      };
+      return {
+        ...prev,
+        // Never overwrite a snapshot already recorded for the finishing cycle.
+        [finishing]: finishingEntry.trainingMaxSnapshot
+          ? finishingEntry
+          : { ...finishingEntry, trainingMaxSnapshot: snapshotTrainingMaxes(beforeTMs) },
+        [newBlockNum]: {
+          name: `Block ${newBlockNum}`,
+          startDate: today,
+          currentWeek: 1,
+          trainingMaxSnapshot: snapshotTrainingMaxes(nextTMs)
+        }
+      };
+    });
+
+    setCurrentBlock(newBlockNum);
+    setCurrentWeek(1);
+    setShowRolloverModal(false);
+    setRolloverSuggestions([]);
+    setRolloverSelected({});
+    setRolloverEdits({});
+    setRolloverUntrained(0);
+  };
+
+  // "New Cycle" button: review the training-max rollover whenever there is anything to review.
+  const handleNewCycleClick = () => {
+    const { rows, untrained } = buildCycleRolloverSuggestions(currentBlock);
+    if (rows.length === 0) {
+      if (!window.confirm("Start a new training cycle? You'll return to Week 1.")) return;
+      startNewCycle([]);
+      return;
+    }
+    setRolloverSuggestions(rows);
+    setRolloverSelected(rows.reduce((acc, _, i) => { acc[i] = true; return acc; }, {}));
+    setRolloverEdits({});
+    setRolloverUntrained(untrained);
+    setShowRolloverModal(true);
   };
 
   // Merge one or more exercises' entire history into another (relabel logs, recompute PRs, fold TMs & template).
@@ -3512,6 +3733,15 @@ const WorkoutTracker = () => {
                                     {delta > 0 ? '+' : ''}{delta} lb since {tm.history[0].date}
                                   </p>
                                 )}
+                                {(() => {
+                                  const series = trainingMaxByCycle[name.toLowerCase().trim()] || [];
+                                  if (series.length < 2) return null;
+                                  return (
+                                    <p className="text-xs text-gray-500 mt-0.5 truncate" title="Training max by cycle">
+                                      {series.map(s => "C" + s.block + " " + s.trainingMax).join(" → ")}
+                                    </p>
+                                  );
+                                })()}
                                 <p className="text-xs text-gray-500">Updated {tm.lastUpdated}</p>
                               </div>
                               <button
@@ -4182,18 +4412,9 @@ const WorkoutTracker = () => {
                   ) : null;
                 })()}
                 <button
-                  onClick={() => {
-                    if (!window.confirm("Start a new training cycle? You'll return to Week 1.")) return;
-                    const newBlockNum = Math.max(currentBlock, highestBlockWithData) + 1;
-                    setBlockMetadata(prev => ({
-                      ...prev,
-                      [newBlockNum]: { name: `Block ${newBlockNum}`, startDate: todayLocalISO(), currentWeek: 1 }
-                    }));
-                    setCurrentBlock(newBlockNum);
-                    setCurrentWeek(1);
-                  }}
+                  onClick={handleNewCycleClick}
                   className="px-3 py-1.5 bg-emerald-700 hover:bg-emerald-600 text-white rounded-lg text-xs font-medium flex items-center gap-1"
-                  title="Start a new training cycle"
+                  title="Start a new training cycle and roll your training maxes forward"
                 >
                   <Plus className="w-3.5 h-3.5" />
                   New Cycle
@@ -5897,6 +6118,114 @@ const WorkoutTracker = () => {
                 className="flex-1 bg-purple-600 hover:bg-purple-700 text-white font-bold py-3 rounded-lg transition-colors"
               >
                 Apply Selected
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Cycle Rollover Modal -- the training maxes the NEXT cycle will run at. Nothing is written
+          until Apply: every row is optional and its new TM is editable. */}
+      {showRolloverModal && rolloverSuggestions.length > 0 && (
+        <div className="fixed inset-0 bg-black/80 flex items-center justify-center z-50 p-4 md:p-6">
+          <div className="bg-gray-800 rounded-lg border-2 border-purple-500 p-5 md:p-6 max-w-lg w-full max-h-[90vh] flex flex-col">
+            <div className="text-center mb-4">
+              <TrendingUp className="w-10 h-10 text-purple-400 mx-auto mb-2" />
+              <h2 className="text-2xl font-bold text-purple-300 mb-1">Roll Training Maxes Forward</h2>
+              <p className="text-gray-400 text-sm">
+                Every percentage in the next cycle is calculated from these. Beat a lift and its TM
+                follows the new 1RM; train it without a PR and it still moves by the standard increment.
+              </p>
+            </div>
+
+            <div className="space-y-2 mb-4 overflow-y-auto flex-1">
+              {rolloverSuggestions.map((r, idx) => {
+                const raw = rolloverEdits[idx];
+                const editedTM = raw !== undefined && raw !== "" ? parseFloat(raw) : NaN;
+                const shownTM = isNaN(editedTM) ? r.newTrainingMax : editedTM;
+                const delta = r.currentTrainingMax !== null
+                  ? Math.round((shownTM - r.currentTrainingMax) * 10) / 10
+                  : null;
+                const checked = !!rolloverSelected[idx];
+                return (
+                  <div
+                    key={r.targetKey}
+                    className={`flex items-start gap-3 p-3 rounded-lg border ${checked ? "bg-gray-900/50 border-purple-700/30" : "bg-gray-900/20 border-gray-700/50 opacity-60"}`}
+                  >
+                    <input
+                      type="checkbox"
+                      checked={checked}
+                      onChange={(e) => setRolloverSelected(prev => ({ ...prev, [idx]: e.target.checked }))}
+                      className="mt-1 w-4 h-4 accent-purple-500 shrink-0"
+                      title={checked ? "Leave this training max alone" : "Include this training max"}
+                    />
+                    <div className="flex-1 min-w-0">
+                      <p className="font-medium text-gray-100 text-sm flex items-center gap-2 flex-wrap">
+                        <span className="truncate">{r.targetKey}</span>
+                        {r.reason === "pr" && <span className="text-xs px-1.5 py-0.5 bg-yellow-900/50 text-yellow-400 rounded shrink-0">New PR</span>}
+                        {r.reason === "new" && <span className="text-xs px-1.5 py-0.5 bg-emerald-900/50 text-emerald-400 rounded shrink-0">New TM</span>}
+                        {r.reason === "increment" && <span className="text-xs px-1.5 py-0.5 bg-blue-900/50 text-blue-400 rounded shrink-0">+{r.increment} lb</span>}
+                      </p>
+                      <p className="text-xs text-gray-400 mt-1">
+                        {r.currentTrainingMax !== null
+                          ? <>TM <span className="text-gray-500">{r.currentTrainingMax} lb</span> &rarr; <span className="text-purple-300 font-medium">{shownTM} lb</span></>
+                          : <>TM <span className="text-purple-300 font-medium">{shownTM} lb</span> &middot; {r.pct}% of {r.newTrue1RM} lb</>}
+                        {delta !== null && delta !== 0 && (
+                          <span className={delta > 0 ? "text-emerald-400" : "text-red-400"}> ({delta > 0 ? "+" : ""}{delta} lb)</span>
+                        )}
+                      </p>
+                      <p className="text-xs text-gray-500 mt-0.5">
+                        {r.reason === "increment"
+                          ? <>no new 1RM this cycle &middot; standard +{r.increment} lb</>
+                          : <>best set {r.weight} lb &times; {r.reps} &rarr; 1RM {r.bestE1RM} lb</>}
+                        {r.matchedByName && <span className="text-amber-400"> &middot; logged as "{r.exerciseName}"</span>}
+                      </p>
+                    </div>
+                    <div className="shrink-0 text-right">
+                      <label className="block text-[10px] text-gray-500 mb-0.5">New TM</label>
+                      <input
+                        type="number"
+                        inputMode="decimal"
+                        step="2.5"
+                        value={raw !== undefined ? raw : r.newTrainingMax}
+                        onChange={(e) => setRolloverEdits(prev => ({ ...prev, [idx]: e.target.value }))}
+                        className="w-20 px-2 py-1 bg-gray-700 border border-gray-600 rounded text-gray-100 text-sm text-right"
+                        title="Override the training max for this exercise"
+                      />
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+
+            {rolloverUntrained > 0 && (
+              <p className="text-xs text-gray-500 mb-4">
+                {rolloverUntrained} training max{rolloverUntrained === 1 ? "" : "es"} left unchanged &mdash; nothing logged this cycle.
+              </p>
+            )}
+
+            <div className="flex gap-3">
+              <button
+                onClick={() => startNewCycle([])}
+                className="flex-1 bg-gray-700 hover:bg-gray-600 text-gray-200 font-medium py-3 rounded-lg transition-colors"
+                title="Start the new cycle without changing any training max"
+              >
+                Skip
+              </button>
+              <button
+                onClick={() => {
+                  const rows = rolloverSuggestions.reduce((acc, r, idx) => {
+                    if (!rolloverSelected[idx]) return acc;
+                    const editedTM = parseFloat(rolloverEdits[idx]);
+                    // An edited TM is back-derived into a 1RM so the stored pair stays consistent.
+                    acc.push(editedTM > 0 ? { ...r, newTrue1RM: Math.round(editedTM * 100 / r.pct) } : r);
+                    return acc;
+                  }, []);
+                  startNewCycle(rows);
+                }}
+                className="flex-1 bg-purple-600 hover:bg-purple-700 text-white font-bold py-3 rounded-lg transition-colors"
+              >
+                Apply &amp; Start Cycle
               </button>
             </div>
           </div>
