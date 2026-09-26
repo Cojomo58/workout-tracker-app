@@ -2913,7 +2913,7 @@ const WorkoutTracker = () => {
   // "Start fresh"), else loads the saved log, else prefills from last week or the template.
   // `week` lets the unsaved-drafts banner jump straight to a draft sitting in another week;
   // it's batched with setView so the log view — and the save it produces — lands on that week.
-  const loadDayIntoLogView = (day, { skipDraft = false, week = currentWeek } = {}) => {
+  const loadDayIntoLogView = (day, { skipDraft = false, skipPlan = false, week = currentWeek } = {}) => {
     const logKey = `block${currentBlock}-week${week}-${day}`;
     if (week !== currentWeek) setCurrentWeek(week);
     setSelectedDay(day);
@@ -2939,8 +2939,10 @@ const WorkoutTracker = () => {
         const draftHasCompletedSets = (draft.exercises || []).some(ex => (ex.sets || []).some(s => s.completed));
         // A draft opened for a future day was originally dated the planning day, not today. Only
         // trust the stored date once real work has been marked done on it — that's the point a
-        // draft stops being a plan-in-progress and becomes an actual in-progress session.
-        setLogDate(draftHasCompletedSets ? (draft.date || todayLocalISO()) : todayLocalISO());
+        // draft stops being a plan-in-progress and becomes an actual in-progress session. A draft
+        // of an already-saved log is an edit to that workout, so it always keeps its own date.
+        const keepDraftDate = draftHasCompletedSets || !!workoutLogs[logKey];
+        setLogDate(keepDraftDate ? (draft.date || todayLocalISO()) : todayLocalISO());
         setExercises(draft.exercises || []);
         setPrefilled(false);
         setDraftBanner({ savedAt: draft.savedAt });
@@ -2954,7 +2956,8 @@ const WorkoutTracker = () => {
     const template = getCurrentTemplate();
     const workout = template[day];
     const existingLog = workoutLogs[logKey];
-    const plan = !existingLog ? getPlan(currentBlock, week, day) : null;
+    // skipPlan: "Reset to template" deletes the plan via setState, which this closure can't see yet.
+    const plan = (!existingLog && !skipPlan) ? getPlan(currentBlock, week, day) : null;
 
     if (existingLog) {
       setLogDate(existingLog.date);
@@ -4763,7 +4766,7 @@ const WorkoutTracker = () => {
                   onClick={() => {
                     deletePlan(currentBlock, currentWeek, selectedDay);
                     setPlanBanner(null);
-                    loadDayIntoLogView(selectedDay, { skipDraft: true });
+                    loadDayIntoLogView(selectedDay, { skipDraft: true, skipPlan: true });
                   }}
                   className="text-xs text-purple-400 hover:text-purple-300 underline shrink-0"
                   title="Discard the plan and reload from the template"
