@@ -78,13 +78,17 @@ const readWeekMirror = (blockNum) => {
 };
 
 // Which week to open on. getNextUpSlot alone returns week 1 for any block with no logs yet,
-// which is how a cycle that hadn't been saved to in a while kept reopening on Week 1 — so the
-// stored week wins whenever it's ahead of what the logs imply, and the logs win once they pass
-// it. The cap admits `next` so a legitimately-week-5 slot is never clamped onto a logged week.
+// which is how a cycle that hadn't been saved to in a while kept reopening on Week 1 — so with
+// no logs, the stored week wins whenever it's ahead of what the logs imply. But once the block
+// HAS logs, a stored week ahead of them no longer wins: that's just someone peeking/planning a
+// future week without training it yet, and letting it stick is what stranded the app on that
+// week forever. With logs present, the logs alone decide. The cap still admits `next` so a
+// legitimately-week-5 slot is never clamped onto a logged week.
 const resolveStartWeek = (blockNum, logs, template, storedWeek, blockWeeks) => {
   const next = getNextUpSlot(blockNum, logs, template).week;
   const stored = parseInt(storedWeek, 10);
-  const week = Number.isFinite(stored) && stored >= 1 ? Math.max(stored, next) : next;
+  const hasLogs = Object.keys(logs || {}).some(k => k.startsWith(`block${blockNum}-`));
+  const week = (!hasLogs && Number.isFinite(stored) && stored >= 1) ? Math.max(stored, next) : next;
   const cap = Math.max(1, parseInt(blockWeeks, 10) || 4, next);
   return Math.min(Math.max(1, week), cap);
 };
@@ -500,6 +504,7 @@ const WorkoutTracker = () => {
   const [draftSavedAt, setDraftSavedAt] = useState(null);
   const [draftSaving, setDraftSaving] = useState(false);
   const [draftBanner, setDraftBanner] = useState(null); // { savedAt } when a restored draft is showing
+  const [planBanner, setPlanBanner] = useState(null); // { savedAt } when a loaded plan (not a draft or log) is showing
   const [saveNotice, setSaveNotice] = useState(null); // { kind: 'success' | 'error', message }
   const [draftsVersion, setDraftsVersion] = useState(0); // bumped on every draft write so the calendar banner can react
   const [showExitConfirm, setShowExitConfirm] = useState(false);
@@ -1354,6 +1359,34 @@ const WorkoutTracker = () => {
       delete drafts[logKey];
       writeDraftsObject(drafts);
     }
+  };
+
+  // Plans: exercises set up for a future day that hasn't been trained yet — distinct from a log
+  // (a real, completed workout) and from a draft (in-progress edits to whichever day is open).
+  // Ride the existing block_metadata JSONB, same precedent as currentWeek/trainingMaxSnapshot, so
+  // plans need no Supabase migration and export/import/cloud sync pick them up for free.
+  const getPlan = (block, week, day) => blockMetadata[block]?.plans?.[`week${week}-${day}`] || null;
+
+  const savePlan = (block, week, day, planExercises) => {
+    const key = `week${week}-${day}`;
+    setBlockMetadata(prev => {
+      const entry = prev[block] || { name: `Block ${block}`, startDate: todayLocalISO() };
+      return {
+        ...prev,
+        [block]: { ...entry, plans: { ...(entry.plans || {}), [key]: { exercises: planExercises, savedAt: Date.now() } } }
+      };
+    });
+  };
+
+  const deletePlan = (block, week, day) => {
+    const key = `week${week}-${day}`;
+    setBlockMetadata(prev => {
+      const entry = prev[block];
+      if (!entry?.plans?.[key]) return prev;
+      const nextPlans = { ...entry.plans };
+      delete nextPlans[key];
+      return { ...prev, [block]: { ...entry, plans: nextPlans } };
+    });
   };
 
   const timeAgo = (ms) => {
@@ -2672,6 +2705,19 @@ const WorkoutTracker = () => {
     [exercises]
   );
 
+  // A "planning" day is a day being set up ahead of time, not trained yet: it has no saved log,
+  // it sits after nextUpSlot (a later week, or the same week at a later ALL_DAYS position), and
+  // nothing on it has been marked completed. The moment a set is checked off, it's a real workout
+  // in progress even if it's technically ahead of schedule — so this flips back to logging mode
+  // rather than staying stuck offering "Save Plan" for a workout someone is actually doing.
+  const isPlanningDay = useMemo(() => {
+    if (!selectedDay || !currentLogKey || workoutLogs[currentLogKey]) return false;
+    const isAfterNextUp = currentWeek > nextUpSlot.week ||
+      (currentWeek === nextUpSlot.week && ALL_DAYS.indexOf(selectedDay) > ALL_DAYS.indexOf(nextUpSlot.day));
+    if (!isAfterNextUp) return false;
+    return !exercises.some(ex => (ex.sets || []).some(s => s.completed));
+  }, [selectedDay, currentLogKey, workoutLogs, currentWeek, nextUpSlot, exercises]);
+
   const getPreviousSession = (exerciseName, excludeLogKey) => {
     const history = getAllExerciseHistory(exerciseName, excludeLogKey);
     // Get the most recent session (first item in sorted array)
@@ -2787,10 +2833,13 @@ const WorkoutTracker = () => {
       prev
     ));
 
-    // Committed — the draft, the rest timer and the session clock no longer apply.
+    // Committed — the draft, the rest timer and the session clock no longer apply. And if this
+    // slot had a plan, it's now a real log, so the plan is redundant — drop it.
     deleteDraft(logKey);
+    deletePlan(currentBlock, currentWeek, selectedDay);
     setDraftSavedAt(null);
     setDraftBanner(null);
+    setPlanBanner(null);
     stopRestTimer();
     setSessionTimer(null);
     // Re-baseline the dirty check so closing a just-saved workout doesn't prompt to save it again
@@ -2823,6 +2872,43 @@ const WorkoutTracker = () => {
     }
   };
 
+  // Save Plan: the non-log way to set up a future day ahead of time. Deliberately does NOT
+  // touch workoutLogs, personalRecords, TM suggestions or currentWeek — those are what a real
+  // Save Workout means, and letting a plan hijack them (via getNextUpSlot, the week, PRs, TM
+  // raises, "last session") is exactly the bug this feature exists to avoid.
+  const handleSavePlan = () => {
+    if (!selectedDay) return;
+    const cleaned = exercises.filter(ex => ex.name && String(ex.name).trim());
+    if (cleaned.length === 0) {
+      setSaveNotice({ kind: 'error', message: 'Add at least one named exercise before saving a plan.' });
+      return;
+    }
+    // Strip completed (a plan hasn't been performed) and UI-only fields, but keep the template
+    // fields (templateTarget/templatePercentage/tmLink/etc.) so the TM/target UI still renders
+    // when the plan is reopened.
+    const exercisesToSave = cleaned.map(({ _notesOpen, pendingTypeChange, ...ex }) => ({
+      ...ex,
+      sets: ex.sets.map(({ completed, weightSource, ...set }) => set)
+    }));
+    savePlan(currentBlock, currentWeek, selectedDay, exercisesToSave);
+
+    deleteDraft(currentLogKey);
+    setDraftSavedAt(null);
+    setDraftBanner(null);
+    setPlanBanner(null);
+    setSessionTimer(null);
+    stopRestTimer();
+    // Re-baseline the dirty check so closing right after Save Plan doesn't prompt the exit guard.
+    openedSnapshotRef.current = JSON.stringify({ exercises, logDate });
+
+    setSaveNotice({
+      kind: 'success',
+      message: `Planned ${DAY_LABELS[selectedDay]} · Week ${currentWeek}`
+    });
+    setPrefilled(false);
+    setView('calendar');
+  };
+
   // Opens a day's log: restores an in-progress draft if one exists (unless skipDraft, used by
   // "Start fresh"), else loads the saved log, else prefills from last week or the template.
   // `week` lets the unsaved-drafts banner jump straight to a draft sitting in another week;
@@ -2833,15 +2919,28 @@ const WorkoutTracker = () => {
     setSelectedDay(day);
     openedSnapshotRef.current = null;
     setDraftSavedAt(null); // avoid showing the previous day's "Saved Ns ago" until this one autosaves
+    setPlanBanner(null);
+
     // Start/restore the session clock up front — both the early-return draft-restore branch below
     // and the normal load path must get it, and re-opening an already-saved day should seed it
-    // paused with the recorded duration rather than starting a fresh running clock.
-    startSessionFor(logKey, workoutLogs[logKey]?.durationSeconds);
+    // paused with the recorded duration rather than starting a fresh running clock. But never for
+    // a day being merely planned ahead of schedule (after nextUpSlot, no log yet) — the planning
+    // time itself isn't workout time, and Save Plan doesn't write a durationSeconds anywhere.
+    const existingLogForClock = workoutLogs[logKey];
+    const isAheadOfNextUp = week > nextUpSlot.week ||
+      (week === nextUpSlot.week && ALL_DAYS.indexOf(day) > ALL_DAYS.indexOf(nextUpSlot.day));
+    if (existingLogForClock || !isAheadOfNextUp) {
+      startSessionFor(logKey, existingLogForClock?.durationSeconds);
+    }
 
     if (!skipDraft) {
       const draft = readDrafts()[logKey];
       if (draft) {
-        setLogDate(draft.date || todayLocalISO());
+        const draftHasCompletedSets = (draft.exercises || []).some(ex => (ex.sets || []).some(s => s.completed));
+        // A draft opened for a future day was originally dated the planning day, not today. Only
+        // trust the stored date once real work has been marked done on it — that's the point a
+        // draft stops being a plan-in-progress and becomes an actual in-progress session.
+        setLogDate(draftHasCompletedSets ? (draft.date || todayLocalISO()) : todayLocalISO());
         setExercises(draft.exercises || []);
         setPrefilled(false);
         setDraftBanner({ savedAt: draft.savedAt });
@@ -2855,6 +2954,7 @@ const WorkoutTracker = () => {
     const template = getCurrentTemplate();
     const workout = template[day];
     const existingLog = workoutLogs[logKey];
+    const plan = !existingLog ? getPlan(currentBlock, week, day) : null;
 
     if (existingLog) {
       setLogDate(existingLog.date);
@@ -2863,6 +2963,13 @@ const WorkoutTracker = () => {
       // here, editing a saved workout would mutate workoutLogs directly.
       setExercises(structuredClone(existingLog.exercises));
       setPrefilled(false);
+    } else if (plan) {
+      // A plan is always reopened dated today, never the day it was planned on — it isn't a
+      // workout until Save Workout actually logs it.
+      setLogDate(todayLocalISO());
+      setExercises(structuredClone(plan.exercises));
+      setPrefilled(false);
+      setPlanBanner({ savedAt: plan.savedAt });
     } else {
       setLogDate(todayLocalISO());
 
@@ -4519,6 +4626,9 @@ const WorkoutTracker = () => {
                 const logKey = `block${currentBlock}-week${currentWeek}-${day}`;
                 const log = workoutLogs[logKey];
                 const isNextUp = !log && currentWeek === nextUpSlot.week && day === nextUpSlot.day;
+                // "Planned" is informational only — a plan is not a completed state, so isNextUp
+                // still wins the emerald ring/badge when both are true.
+                const isPlanned = !log && !!getPlan(currentBlock, currentWeek, day);
 
                 return (
                   <div
@@ -4542,6 +4652,14 @@ const WorkoutTracker = () => {
                               title="Picks up where your last saved workout left off"
                             >
                               Next up
+                            </span>
+                          )}
+                          {isPlanned && (
+                            <span
+                              className="text-xs font-medium text-purple-300 bg-purple-900/40 border border-purple-700/50 px-2 py-0.5 rounded"
+                              title="Weights are planned for this day — open it to review or log it as a completed workout"
+                            >
+                              Planned
                             </span>
                           )}
                           {log?.date && (
@@ -4627,6 +4745,30 @@ const WorkoutTracker = () => {
                   title="Discard the draft and reload from the template"
                 >
                   Start fresh
+                </button>
+              </div>
+            )}
+
+            {/* Shown instead of draftBanner (mutually exclusive — a day loads a draft, a log, or
+                a plan, never more than one) when this day's exercises came from a saved plan. */}
+            {planBanner && (
+              <div className="flex items-center justify-between p-3 bg-purple-950/30 border border-purple-800/50 rounded-lg flex-wrap gap-2">
+                <div className="flex items-center gap-2">
+                  <History className="w-4 h-4 text-purple-400" />
+                  <span className="text-sm text-purple-300">
+                    Loaded your plan from {timeAgo(planBanner.savedAt)}
+                  </span>
+                </div>
+                <button
+                  onClick={() => {
+                    deletePlan(currentBlock, currentWeek, selectedDay);
+                    setPlanBanner(null);
+                    loadDayIntoLogView(selectedDay, { skipDraft: true });
+                  }}
+                  className="text-xs text-purple-400 hover:text-purple-300 underline shrink-0"
+                  title="Discard the plan and reload from the template"
+                >
+                  Reset to template
                 </button>
               </div>
             )}
@@ -5807,16 +5949,59 @@ const WorkoutTracker = () => {
                 that whenever currentBlock ran ahead of every block with data the button silently
                 vanished — and since saving is the only way to give a block data, the state was a
                 permanent deadlock. Past cycles aren't browsable any more (v2.8), so the gate had
-                nothing left to protect. It's disabled-with-a-reason instead of absent. */}
-            <button
-              onClick={handleSaveWorkout}
-              disabled={!hasSaveableExercise}
-              title={hasSaveableExercise ? 'Log this workout' : 'Add an exercise before saving'}
-              className="flex-1 bg-emerald-600 text-white py-3 rounded-lg font-medium hover:bg-emerald-700 flex items-center justify-center gap-2 disabled:bg-gray-700 disabled:text-gray-500 disabled:cursor-not-allowed"
-            >
-              <Save className="w-5 h-5" />
-              Save Workout
-            </button>
+                nothing left to protect. It's disabled-with-a-reason instead of absent.
+                isPlanningDay flips the primary action to Save Plan — a future day being set up
+                ahead of time must not be one Save Workout press away from hijacking Next up, the
+                week, PRs and TM suggestions. A secondary link still reaches whichever action isn't
+                primary, since a day can legitimately be either (e.g. skipping ahead and actually
+                training it). */}
+            <div className="flex-1 flex flex-col gap-1.5">
+              {isPlanningDay ? (
+                <>
+                  <button
+                    onClick={handleSavePlan}
+                    disabled={!hasSaveableExercise}
+                    title={hasSaveableExercise ? "Save these planned exercises — doesn't count as a workout" : 'Add an exercise before saving'}
+                    className="w-full bg-purple-600 text-white py-3 rounded-lg font-medium hover:bg-purple-700 flex items-center justify-center gap-2 disabled:bg-gray-700 disabled:text-gray-500 disabled:cursor-not-allowed"
+                  >
+                    <Save className="w-5 h-5" />
+                    Save Plan
+                  </button>
+                  <button
+                    onClick={handleSaveWorkout}
+                    disabled={!hasSaveableExercise}
+                    title="Already did this today? Log it as a completed workout instead of a plan."
+                    className="text-xs text-gray-400 hover:text-gray-200 underline disabled:text-gray-600 disabled:no-underline disabled:cursor-not-allowed"
+                  >
+                    Log as completed workout
+                  </button>
+                </>
+              ) : (
+                <>
+                  <button
+                    onClick={handleSaveWorkout}
+                    disabled={!hasSaveableExercise}
+                    title={hasSaveableExercise ? 'Log this workout' : 'Add an exercise before saving'}
+                    className="w-full bg-emerald-600 text-white py-3 rounded-lg font-medium hover:bg-emerald-700 flex items-center justify-center gap-2 disabled:bg-gray-700 disabled:text-gray-500 disabled:cursor-not-allowed"
+                  >
+                    <Save className="w-5 h-5" />
+                    Save Workout
+                  </button>
+                  {/* Only offered while the day has no saved log — once it's a real workout, saving
+                      it as a plan on top would be meaningless. */}
+                  {!workoutLogs[currentLogKey] && (
+                    <button
+                      onClick={handleSavePlan}
+                      disabled={!hasSaveableExercise}
+                      title="Set this up as a plan for later, without logging a workout"
+                      className="text-xs text-purple-400 hover:text-purple-300 underline disabled:text-gray-600 disabled:no-underline disabled:cursor-not-allowed"
+                    >
+                      Save as plan
+                    </button>
+                  )}
+                </>
+              )}
+            </div>
             </div>
           </div>
         )}
@@ -5852,15 +6037,26 @@ const WorkoutTracker = () => {
           <div className="bg-gray-800 rounded-lg border border-gray-700 p-6 max-w-sm w-full">
             <ModalHeader title="Unsaved changes" onClose={() => setShowExitConfirm(false)} />
             <p className="text-sm text-gray-300 mb-5">
-              You have edits that haven't been saved as a workout yet. Your draft is autosaved, so it's safe to leave — but Save Workout is what actually logs it for PRs and progress.
+              {isPlanningDay
+                ? "You've set up exercises for a day you haven't trained yet. Your draft is autosaved, so it's safe to leave — but Save Plan is what keeps these weights for when you get there. A plan doesn't count as a workout."
+                : "You have edits that haven't been saved as a workout yet. Your draft is autosaved, so it's safe to leave — but Save Workout is what actually logs it for PRs and progress."}
             </p>
             <div className="flex flex-col gap-2">
-              <button
-                onClick={() => setShowExitConfirm(false)}
-                className="w-full py-2.5 px-4 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg font-medium"
-              >
-                Stay and Save Workout
-              </button>
+              {isPlanningDay ? (
+                <button
+                  onClick={() => { setShowExitConfirm(false); handleSavePlan(); }}
+                  className="w-full py-2.5 px-4 bg-purple-600 hover:bg-purple-700 text-white rounded-lg font-medium"
+                >
+                  Save Plan
+                </button>
+              ) : (
+                <button
+                  onClick={() => setShowExitConfirm(false)}
+                  className="w-full py-2.5 px-4 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg font-medium"
+                >
+                  Stay and Save Workout
+                </button>
+              )}
               <button
                 onClick={() => {
                   setShowExitConfirm(false);

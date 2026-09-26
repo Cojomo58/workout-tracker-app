@@ -35,10 +35,12 @@ Custom theme tokens (gold/volume colors, pr-bounce/timer-pulse animations) live 
 ```javascript
 blockMetadata = {
   1: { name: "Spring 2025 Hypertrophy", startDate: "2025-01-15", currentWeek: 3,
-       trainingMaxSnapshot: { "Bench Press": { true1RM: 236, trainingMax: 212.5, trainingMaxPercent: 90 } } },
+       trainingMaxSnapshot: { "Bench Press": { true1RM: 236, trainingMax: 212.5, trainingMaxPercent: 90 } },
+       plans: { "week4-friday": { exercises: [...], savedAt: 1737000000000 } } },
   2: { name: "Summer Cut", startDate: "2025-04-01", currentWeek: 1, trainingMaxSnapshot: { ... } }
 }
 // currentBlock: integer — which block is active (1-N)
+// plans: exercises set up for a future day that hasn't been trained yet (see Planning ahead v3.1) — not a log
 ```
 
 ### Workout Log Entry
@@ -125,6 +127,8 @@ trainingMaxes = {
 - `checkForPRs()`: Detect new PRs during save
 - `computePRsForExercise(basePRs, name, sets, date, logKey, type)`: Returns a NEW PR map with one exercise folded in — reduce it over a session's exercises (was `updatePRs()`, which called `setPersonalRecords` off a stale closure)
 - `handleSaveWorkout()`: The only path that commits a workout log; verifies the localStorage write before discarding the draft
+- `handleSavePlan()`: Saves a future day's exercises as a plan (`blockMetadata[block].plans`) without logging a workout — see Planning ahead (v3.1)
+- `getPlan(block, week, day)` / `savePlan(block, week, day, exercises)` / `deletePlan(block, week, day)`: Read/write/remove a single plan, all via functional `setBlockMetadata` updates
 - `todayLocalISO()`: Today's LOCAL `YYYY-MM-DD` — use instead of `toISOString().split('T')[0]`, which is UTC
 - `resolveStartWeek()` / `parseLogKey()` / `earliestDateForBlock()` / `readWeekMirror()`: module-level helpers next to `getNextUpSlot`
 - `getAllExerciseHistory()`: Get all-time exercise history across all blocks
@@ -171,7 +175,7 @@ trainingMaxes = {
 ### Week tracking (v2.9)
 - `getNextUpSlot` alone is **not** enough to pick the opening week: it returns week 1 for any cycle with zero logs, so a cycle that hadn't been saved to reopened on Week 1 every time. The week is now persisted.
 - **Where it's stored:** `blockMetadata[blockNum].currentWeek`, so it rides the existing `block_metadata` JSONB column — **no Supabase migration**. A scalar `current-week` localStorage key (`{ block, week }`) mirrors it in case the metadata map is lost. An effect on `[currentBlock, currentWeek, dataLoaded]` writes both; its functional `setBlockMetadata` updater is what keeps it from looping, and it doubles as the self-heal that guarantees an entry for the active cycle.
-- **`resolveStartWeek(blockNum, logs, template, storedWeek, blockWeeks)`** (module-level) is what both load paths call: `Math.max(storedWeek, getNextUpSlot(...).week)`, capped at `Math.max(blockWeeks, nextUp)`. The stored week wins when the cycle has no logs yet; the logs win once they pass it, so the week still advances on its own.
+- **`resolveStartWeek(blockNum, logs, template, storedWeek, blockWeeks)`** (module-level) is what both load paths call. The stored week only wins while the block has **no logs at all** — that's the "hadn't been saved to in a while" case it exists for. Once the block has any logs, a stored week ahead of them is ignored and `getNextUpSlot(...).week` alone decides; otherwise merely navigating forward to plan a future week (v3.1) would strand the app on that week at every launch even though nothing was ever trained there. Capped at `Math.max(blockWeeks, nextUp)` either way.
 - `handleSaveWorkout` bumps `currentWeek` to `getNextUpSlot(...)`'s week when a save finishes the week — the header and the "Next up" badge are driven by the same function and can't disagree.
 - The forward chevron caps at `Math.max(blocks[0].weeks || 4, nextUpSlot.week)`, not at the block length alone. The old cap stranded anyone on week 4 of a 4-week block.
 
@@ -209,6 +213,17 @@ trainingMaxes = {
 - **Modal:** clone of the TM-suggestion modal with per-row checkboxes *and* an editable New TM field per row; an edited TM is back-derived into a 1RM on apply. **Skip** starts the cycle changing nothing.
 - **Shared resolution:** `resolveTMKey(name, tmLink, tmKeys)` (`tmLink` → exact → case-insensitive → `findSimilarExercise`) is now used by both `buildTMSuggestions()` and the rollover, so the per-save and per-cycle paths agree. `lookupTrainingMax()` gives `getPercentageWeight()`/`getBest1RM()` the same case-insensitive fallback the log-view %TM badge always had — without it a template exercise spelled "bench press" silently auto-filled nothing against a "Bench Press" TM.
 - `roundToNearest2_5`, `deriveTrainingMax`, `foldTrainingMax`, `cycleIncrementFor` and `snapshotTrainingMaxes` are **module-level and pure** (top of App.jsx, next to `performedSets`); `saveTrainingMax` is now a one-line wrapper over `foldTrainingMax`.
+
+### Planning ahead (v3.1)
+- **The problem it solves:** setting up a future day's weights required Save Workout, which writes a real log — hijacking `getNextUpSlot`/"Next up" (it jumps past the planned day), the opening week (a stored week ahead of the logs used to win, so peeking at a future week stuck the app there), PRs and TM suggestions (recorded from weights never actually lifted), "last session" (the planned day shows up as history), and the session clock (planning time got stamped as `durationSeconds`). A **plan** is a separate concept: exercises saved for a day, without any of that.
+- **Storage:** `blockMetadata[block].plans = { [\`week${w}-${day}\`]: { exercises, savedAt } }`, same precedent as `currentWeek`/`trainingMaxSnapshot` — rides the existing `block_metadata` JSONB column, **no Supabase migration**, and export/import/cloud sync carry it for free. `getPlan(block, week, day)` / `savePlan(block, week, day, exercises)` / `deletePlan(block, week, day)` (near the draft helpers) are the only ways it's read or written, all via functional `setBlockMetadata` updates so they can't drop a sibling key (`currentWeek`, `trainingMaxSnapshot`) already on that block's entry.
+- **`isPlanningDay`** (memo): true when the open day has no saved log, sits after `nextUpSlot` (a later week, or the same week at a later `ALL_DAYS` position), and no set on it has `completed: true`. Marking any set complete flips it back to a normal logging day — skipping ahead and actually training a later day still works.
+- **Save Plan** (`handleSavePlan`, next to `handleSaveWorkout`) writes only to `blockMetadata[...].plans`. It never touches `workoutLogs`, `personalRecords`, TM suggestions, or `currentWeek`. It strips `completed` (a plan hasn't been performed) but keeps template fields (`templateTarget`/`templatePercentage`/`tmLink`/etc.) so the TM/target UI still renders when the plan is reopened.
+- **Sticky footer:** when `isPlanningDay`, the primary button is purple **Save Plan** with a secondary text link **"Log as completed workout"** (calls `handleSaveWorkout`). Otherwise it's the normal emerald **Save Workout**, plus a secondary **"Save as plan"** link shown only while the day has no saved log. The exit-guard modal (X button) makes the same swap: Save Plan first, with copy explaining a plan doesn't count as a workout.
+- **Load order in `loadDayIntoLogView`:** draft → saved log → **plan** → previous-week prefill → template. A plan always opens dated **today** (`todayLocalISO()`), never the day it was planned on, with a purple "Loaded your plan" banner and a **"Reset to template"** link (`deletePlan` + reload with `skipDraft`). `handleSaveWorkout` deletes the plan for that slot on a successful save — it's a log now, the plan is redundant.
+- **Draft date fix:** a draft restored for a slot with **no saved log** and **no completed sets** is dated today, not `draft.date` — a draft written while planning a future day used to carry that day's date, so opening it later (once it's actually trained) silently backdated the workout. A draft that already has completed sets keeps its stored date, since that's a real in-progress session.
+- **Session clock:** `startSessionFor` is skipped in `loadDayIntoLogView` when the day is ahead of `nextUpSlot` and has no saved log — planning time is never written into a log's `durationSeconds`.
+- **Calendar:** a small purple **"Planned"** badge (`getPlan(currentBlock, currentWeek, day)` truthy, no log) shows next to the day name. It's informational only — `isNextUp` still wins the emerald ring when both are true.
 
 ## First-Run Onboarding (v2.5)
 - The default template is blank: `createEmptyBlock()` (module-level, defined above `WorkoutTracker`) returns a single block with all 5 weekdays present but empty (`name: '', exercises: []`). This is the initial `blocks` state, and what "Reset to Default Template" / "Full Reset" restore — nothing in the app ships with any individual's personal workout data baked in.
@@ -295,7 +310,7 @@ Logged in:   React State ←→ localStorage (cache) + Supabase (cloud, debounce
 - `personal-records`: All personal records (global, not block-specific)
 - `current-block`: Active block number (integer)
 - `current-week`: Scalar mirror of the active week — `{ block, week }`; fallback for when `block-metadata` is lost
-- `block-metadata`: Named cycle metadata `{ [blockNum]: { name, startDate, currentWeek, trainingMaxSnapshot } }` — `currentWeek` and `trainingMaxSnapshot` both ride this map so neither needs a Supabase migration
+- `block-metadata`: Named cycle metadata `{ [blockNum]: { name, startDate, currentWeek, trainingMaxSnapshot, plans } }` — `currentWeek`, `trainingMaxSnapshot`, and `plans` (`{ "week${w}-${day}": { exercises, savedAt } }`, see Planning ahead v3.1) all ride this map so none of them needs a Supabase migration
 - `training-maxes`: Training max weights `{ [exerciseName]: { true1RM, trainingMaxPercent, trainingMax, lastUpdated } }`
 - `workout-drafts`: In-progress (unsaved) log edits, keyed by logKey — `{ [logKey]: { date, exercises, savedAt } }`; deleted per-key on Save Workout, pruned after 60 days (was 14 — a draft is the only copy of an unsaved session). Surfaced on the Calendar as an amber "You have N unsaved workouts" banner listing every draft with no matching log, each with an Open button that jumps to that draft's week
 - `rest-timer`: The single active rest timer, if any — `{ exIdx, setIdx, exName, endsAt, running, remainingMs, _savedAt }`; dropped on restore if `_savedAt` is over 10 minutes old
@@ -310,7 +325,7 @@ Logged in:   React State ←→ localStorage (cache) + Supabase (cloud, debounce
 | blocks | JSONB | Training template (shared) |
 | personal_records | JSONB | PR tracking (global) |
 | current_block | INTEGER | Active block number |
-| block_metadata | JSONB | Named cycle info `{ blockNum: { name, startDate, currentWeek, trainingMaxSnapshot } }` |
+| block_metadata | JSONB | Named cycle info `{ blockNum: { name, startDate, currentWeek, trainingMaxSnapshot, plans } }` |
 | training_maxes | JSONB | Training max weights (global, not block-specific) |
 | updated_at | TIMESTAMPTZ | Auto-updated timestamp |
 
