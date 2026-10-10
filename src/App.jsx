@@ -2715,12 +2715,19 @@ const WorkoutTracker = () => {
     setTrainingMaxes(prev => {
       const updated = { ...prev };
       let best = updated[toName] || null;
+      // The merged TM stays auto only if every entry was auto — one manual TM in the cluster means
+      // the user set this lift, so the winner's flag mustn't silently hand it to auto-raise.
+      let allAuto = !best || !!best.auto;
       sources.forEach(src => {
         const from = updated[src];
+        if (from && !from.auto) allAuto = false;
         if (from && (!best || from.true1RM > best.true1RM)) best = from;
         delete updated[src];
       });
-      if (best) updated[toName] = { ...best };
+      if (best) {
+        const { auto: _auto, ...rest } = best;
+        updated[toName] = allAuto ? { ...rest, auto: true } : rest;
+      }
       return updated;
     });
     // Relabel template exercises.
