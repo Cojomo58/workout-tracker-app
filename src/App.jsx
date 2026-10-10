@@ -202,6 +202,93 @@ const snapshotTrainingMaxes = (tmMap) =>
     return acc;
   }, {});
 
+// Estimate 1RM via Epley formula: 1RM = weight × (1 + reps/30).
+// Returns 0 if reps > E1RM_MAX_REPS (formula unreliable at high reps) or inputs invalid.
+const estimate1RM = (weight, reps) => {
+  if (!weight || !reps || reps < 1) return 0;
+  if (reps > E1RM_MAX_REPS) return 0;
+  return Math.round(parseFloat(weight) * (1 + parseFloat(reps) / 30));
+};
+
+// Fuzzy matching alone says "Bench Press" ~ "Dumbbell Bench Press" (Jaccard 0.67). Fine for a
+// suggestion the user confirms, wrong for a silent write — a barbell 1RM would raise the dumbbell TM.
+// The auto path therefore also requires the same equipment tokens (none counts as its own kind).
+const EQUIPMENT_TOKENS = new Set(['dumbbell', 'barbell', 'kettlebell', 'cable', 'machine', 'smith', 'band', 'ez', 'trap', 'landmine']);
+const sameEquipment = (a, b) => {
+  const eq = (n) => normalizeExerciseTokens(n).filter(t => EQUIPMENT_TOKENS.has(t)).sort().join(' ');
+  return eq(a) === eq(b);
+};
+
+// Give every logged strength exercise a TM (auto-create), and let auto TMs follow new e1RMs
+// (auto-raise). TMs without `auto: true` are the user's and are never touched here. Returns
+// { map, changed }; `map` is the ORIGINAL tmMap reference when nothing changed, which is what
+// keeps the effect that calls this from looping.
+const buildAutoTrainingMaxes = (logs, tmMap, today) => {
+  // Best e1RM per spelling, plus how often it was logged so the most-used spelling claims the key.
+  const groups = {};
+  Object.values(logs || {}).forEach(log => {
+    (log.exercises || []).forEach(ex => {
+      if ((ex.type || 'strength') !== 'strength' || !ex.name) return;
+      const k = ex.name.toLowerCase().trim();
+      if (!k) return;
+      if (!groups[k]) groups[k] = { name: ex.name.trim(), tmLink: null, sessions: 0, best: 0 };
+      if (ex.tmLink && !groups[k].tmLink) groups[k].tmLink = ex.tmLink;
+      groups[k].sessions += 1;
+      performedSets(ex).forEach(set => {
+        const e1rm = estimate1RM(set.weight, set.reps);
+        if (e1rm > groups[k].best) groups[k].best = e1rm;
+      });
+    });
+  });
+
+  const map = { ...tmMap };
+  const createdNow = new Set();
+  const changed = [];
+
+  Object.values(groups)
+    .filter(g => g.best > 0)
+    .sort((a, b) => b.sessions - a.sessions)
+    .forEach(group => {
+      // Resolve against the map as it's being built, so "DB Bench" lands on the
+      // "Dumbbell Bench Press" TM created a moment ago instead of becoming a second one.
+      const keys = Object.keys(map);
+      const lower = group.name.toLowerCase();
+      const key = (group.tmLink && keys.includes(group.tmLink) && group.tmLink)
+        || keys.find(k => k === group.name)
+        || keys.find(k => k.toLowerCase().trim() === lower)
+        || findSimilarExercise(group.name, keys.filter(k => sameEquipment(k, group.name)))?.name
+        || null;
+
+      if (!key) {
+        map[group.name] = {
+          true1RM: group.best,
+          trainingMaxPercent: DEFAULT_TM_PERCENT,
+          trainingMax: deriveTrainingMax(group.best, DEFAULT_TM_PERCENT),
+          lastUpdated: today,
+          history: [],
+          auto: true
+        };
+        createdNow.add(group.name);
+        changed.push({ name: group.name, isNew: true, true1RM: group.best });
+        return;
+      }
+
+      const existing = map[key];
+      if (!existing?.auto || group.best <= existing.true1RM) return;
+      if (createdNow.has(key)) {
+        // A second spelling of a TM made in this same pass: just take the better number. Folding
+        // would push a same-day history entry and show a bogus "+X lb since today" delta.
+        map[key] = { ...existing, true1RM: group.best, trainingMax: deriveTrainingMax(group.best, existing.trainingMaxPercent) };
+      } else {
+        const folded = foldTrainingMax(map, key, group.best, existing.trainingMaxPercent, today)[key];
+        map[key] = { ...folded, auto: true }; // foldTrainingMax writes a fresh entry without the flag
+      }
+      changed.push({ name: key, isNew: false, true1RM: group.best });
+    });
+
+  return { map: changed.length === 0 ? tmMap : map, changed };
+};
+
 function ExerciseTypeBadge({ type }) {
   const styles = {
     cardio: 'bg-blue-900/50 text-blue-400',
@@ -1105,6 +1192,12 @@ const WorkoutTracker = () => {
     }
   }, [trainingMaxes, dataLoaded]);
 
+  // Auto training maxes (v3.2): every logged strength exercise gets a TM, and auto TMs follow new e1RMs.
+  React.useEffect(() => {
+    if (!dataLoaded) return;
+    setTrainingMaxes(prev => buildAutoTrainingMaxes(workoutLogs, prev, todayLocalISO()).map);
+  }, [workoutLogs, dataLoaded]);
+
   React.useEffect(() => {
     if (dataLoaded) {
       try {
@@ -1535,12 +1628,7 @@ const WorkoutTracker = () => {
   };
 
   // Personal Records Functions
-  const calculateEstimated1RM = (weight, reps) => {
-    if (!weight || !reps || reps < 1) return 0;
-    if (reps > E1RM_MAX_REPS) return 0;
-    // Epley formula: 1RM = weight × (1 + reps/30)
-    return Math.round(parseFloat(weight) * (1 + parseFloat(reps) / 30));
-  };
+  const calculateEstimated1RM = estimate1RM; // module-level so buildAutoTrainingMaxes can use it
 
   // Training Max utility functions. roundToNearest2_5 / deriveTrainingMax are module-level (pure).
 
@@ -2403,7 +2491,8 @@ const WorkoutTracker = () => {
   };
 
   // Build training-max suggestions from the strength exercises just logged.
-  // Never writes state — returns a list the user confirms in a modal.
+  // Never writes state — returns a list the user confirms in a modal. Only MANUAL TMs are proposed:
+  // missing TMs are created, and auto TMs raised, by buildAutoTrainingMaxes (v3.2).
   const buildTMSuggestions = (exerciseList) => {
     const tmKeys = Object.keys(trainingMaxes);
     const suggestions = [];
@@ -2424,10 +2513,7 @@ const WorkoutTracker = () => {
       const existing = targetKey ? trainingMaxes[targetKey] : null;
       const pct = existing?.trainingMaxPercent || DEFAULT_TM_PERCENT;
 
-      if (!existing) {
-        suggestions.push({ exerciseName: ex.name, targetKey: resolvedKey, isNew: true, currentTrue1RM: null, suggestedTrue1RM: best1RM, pct, weight: bestWeight, reps: bestReps });
-        usedKeys.add(resolvedKey.toLowerCase());
-      } else if (best1RM > existing.true1RM) {
+      if (existing && !existing.auto && best1RM > existing.true1RM) {
         suggestions.push({ exerciseName: ex.name, targetKey: resolvedKey, isNew: false, currentTrue1RM: existing.true1RM, suggestedTrue1RM: best1RM, pct, weight: bestWeight, reps: bestReps, matchedByName: targetKey.toLowerCase().trim() !== ex.name.toLowerCase().trim() });
         usedKeys.add(resolvedKey.toLowerCase());
       }
@@ -2629,12 +2715,19 @@ const WorkoutTracker = () => {
     setTrainingMaxes(prev => {
       const updated = { ...prev };
       let best = updated[toName] || null;
+      // The merged TM stays auto only if every entry was auto — one manual TM in the cluster means
+      // the user set this lift, so the winner's flag mustn't silently hand it to auto-raise.
+      let allAuto = !best || !!best.auto;
       sources.forEach(src => {
         const from = updated[src];
+        if (from && !from.auto) allAuto = false;
         if (from && (!best || from.true1RM > best.true1RM)) best = from;
         delete updated[src];
       });
-      if (best) updated[toName] = { ...best };
+      if (best) {
+        const { auto: _auto, ...rest } = best;
+        updated[toName] = allAuto ? { ...rest, auto: true } : rest;
+      }
       return updated;
     });
     // Relabel template exercises.
@@ -3822,7 +3915,7 @@ const WorkoutTracker = () => {
                     </button>
                   </div>
                   {Object.keys(trainingMaxes).length === 0 ? (
-                    <p className="text-gray-400 text-sm">No training maxes set. Select an exercise with an Est. 1RM and click "Set as Training Max".</p>
+                    <p className="text-gray-400 text-sm">No training maxes yet — one is created automatically for each strength exercise you log (sets of 12 reps or fewer).</p>
                   ) : (
                     <div className="grid md:grid-cols-2 gap-2">
                       {Object.entries(trainingMaxes)
@@ -3833,7 +3926,10 @@ const WorkoutTracker = () => {
                           return (
                             <div key={name} className="flex items-center justify-between p-3 bg-gray-900/50 rounded-lg border border-gray-700">
                               <div className="min-w-0">
-                                <p className="font-medium text-gray-100 text-sm truncate">{name}</p>
+                                <div className="flex items-center gap-2 min-w-0">
+                                  <p className="font-medium text-gray-100 text-sm truncate min-w-0">{name}</p>
+                                  {tm.auto && <span className="text-[10px] px-1.5 py-0.5 rounded bg-purple-900/40 text-purple-300 border border-purple-700/40 whitespace-nowrap" title="Set automatically from your best logged set (Epley e1RM, 12 reps or fewer). Edit it to take control — then it only changes when you confirm.">Auto</span>}
+                                </div>
                                 <p className="text-xs text-gray-400 mt-0.5">
                                   1RM: {tm.true1RM} lb · {tm.trainingMaxPercent}% →{' '}
                                   <span className="text-purple-300 font-medium">TM: {tm.trainingMax} lb</span>
@@ -4295,10 +4391,41 @@ const WorkoutTracker = () => {
                                           className="w-full px-2 py-1 bg-gray-700 border border-gray-600 rounded-lg text-gray-100 text-sm"
                                         />
                                         {(() => {
-                                          const tmKey = exercise.tmLink || exercise.name;
-                                          const tm = trainingMaxes[tmKey];
-                                          if (exercise.percentage && tm) return <p className="text-xs text-purple-400 mt-1">= {getPercentageWeight(tmKey, exercise.percentage)} lb</p>;
-                                          if (exercise.percentage && !tm) return <p className="text-xs text-gray-500 mt-1">No TM set</p>;
+                                          const tm = lookupTrainingMax(exercise.tmLink || exercise.name);
+                                          // No exact/case-insensitive TM: offer a similarly named one to link
+                                          const fuzzyKey = !tm && exercise.name
+                                            ? resolveTMKey(exercise.name, exercise.tmLink, Object.keys(trainingMaxes))
+                                            : null;
+
+                                          if (exercise.percentage && tm) {
+                                            return (
+                                              <p className="text-xs text-purple-400 mt-1">
+                                                = {getPercentageWeight(exercise.tmLink || exercise.name, exercise.percentage)} lb{' '}
+                                                <span className="text-gray-500">(TM {tm.trainingMax})</span>
+                                              </p>
+                                            );
+                                          }
+                                          if (!exercise.percentage && tm) {
+                                            return <p className="text-xs text-purple-400/70 mt-1">TM {tm.trainingMax} lb</p>;
+                                          }
+                                          if (fuzzyKey) {
+                                            return (
+                                              <div className="flex items-center gap-1.5 mt-1">
+                                                <span className="text-xs text-purple-400/70">Similar TM: {fuzzyKey}</span>
+                                                <button
+                                                  onClick={() => {
+                                                    const newBlocks = [...blocks];
+                                                    newBlocks[0].template[dayKey].exercises[exIdx].tmLink = fuzzyKey;
+                                                    setBlocks(newBlocks);
+                                                  }}
+                                                  className="text-xs text-purple-400 hover:text-purple-300 underline"
+                                                >
+                                                  Link
+                                                </button>
+                                              </div>
+                                            );
+                                          }
+                                          if (exercise.percentage && !tm) return <p className="text-xs text-gray-500 mt-1">No TM yet — log this exercise once</p>;
                                           return null;
                                         })()}
                                       </div>

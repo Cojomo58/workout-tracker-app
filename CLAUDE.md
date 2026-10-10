@@ -102,7 +102,9 @@ trainingMaxes = {
     true1RM: 225,
     trainingMaxPercent: 90,
     trainingMax: 202.5,   // roundToNearest2_5(true1RM * trainingMaxPercent / 100)
-    lastUpdated: "2025-01-15"
+    lastUpdated: "2025-01-15",
+    auto: true,           // optional, set by auto-TM effect (v3.2); absent = manual TM
+    history: [{ true1RM, trainingMax, date }]  // append-only, history[0] is oldest
   }
 }
 // Global (not block-specific). Used to auto-fill set weights from template % of TM.
@@ -139,10 +141,12 @@ trainingMaxes = {
 - `loadFromLocalStorage()`: Load all data from localStorage (seeds blockMetadata for existing users)
 - `loadFromCloud()`: Load all data from Supabase + cache to localStorage
 - `roundToNearest2_5()`: Round weight to nearest 2.5 lb increment
+- `estimate1RM(weight, reps)`: Module-level, pure — Epley formula estimate (used by auto-TM effect and many other places)
 - `deriveTrainingMax(true1RM, pct)`: Calculate training max from 1RM and percentage
 - `getPercentageWeight(exerciseName, percentage)`: Get auto-fill weight for a given TM%
 - `saveTrainingMax(exerciseName, true1RM, pct)`: Save/update a training max entry (wraps `foldTrainingMax`)
 - `foldTrainingMax(prevMap, name, true1RM, pct, today)`: Module-level, pure — returns a NEW TM map with one entry folded in; lets the cycle rollover build a whole map synchronously
+- `buildAutoTrainingMaxes(logs, tmMap, today)`: Module-level, pure — auto-create and auto-raise TMs; returns `{ map, changed }` or original reference if unchanged (stops effect loop)
 - `lookupTrainingMax(name)` / `resolveTMKey(name, tmLink, tmKeys)`: Tolerant TM lookup (exact → case-insensitive) and full resolution (`tmLink` → exact → case-insensitive → fuzzy)
 - `buildCycleRolloverSuggestions(blockNum)`: What every trained exercise's TM should become next cycle — `{ rows, untrained }`, writes nothing
 - `startNewCycle(rowsToApply)`: The only path that advances a cycle; applies confirmed TMs and snapshots both cycles
@@ -198,7 +202,18 @@ trainingMaxes = {
 - Live `%TM` display next to weight input while logging — shows `weight ÷ trainingMax × 100`, updates as you type; uses `tmLink` if set, then case-insensitive name fallback
 - `getBest1RM(exerciseName)`: returns `true1RM` from trainingMaxes if set, else estimated1RM from PRs
 - Weekly progression / 5/3/1 scheme removed — simple single `% of TM` per exercise only
-- **Auto-TM suggestions (suggest, don't auto-apply):** on Save Workout, `buildTMSuggestions()` computes the best Epley 1RM per strength exercise and proposes creating a new TM (if none) or raising an existing one (if the new 1RM is higher). Suggestions surface in a purple confirmation modal (after the PR modal, if any) with per-item checkboxes; nothing is written until the user clicks "Apply Selected". A suggestion resolves to an existing TM via exact name match, then `findSimilarExercise()` against TM keys — so logging "DB Bench" updates the "Dumbbell Bench Press" TM instead of creating a duplicate.
+- **Manual TM suggestions (suggest, don't auto-apply):** on Save Workout, `buildTMSuggestions()` now only proposes raising **manual** TMs (created/edited by the user) when a higher e1RM appears. Auto TMs are raised silently by the effect, so the modal never suggests those. Suggestions surface in a purple confirmation modal (after the PR modal, if any) with per-item checkboxes; nothing is written until the user clicks "Apply Selected". A suggestion resolves to an existing TM via exact name match, then `findSimilarExercise()` against TM keys — so logging "DB Bench" updates the "Dumbbell Bench Press" TM instead of creating a duplicate.
+
+### Auto training maxes (v3.2)
+- **The problem it solves:** a TM only existed if the user confirmed the per-save suggestion modal or created one by hand, so building a template meant setting up TMs first or `% of TM` auto-filled nothing. Now every logged strength exercise gets one automatically, and auto TMs follow new e1RMs in the background.
+- **Rules:**
+  1. **Auto-create**: any strength exercise with at least one valid Epley e1RM (performed sets, reps ≤ 12) in ANY log, and with no TM it resolves to, gets one: `true1RM` = all-time best e1RM, `trainingMaxPercent` = 90 (default), `trainingMax` = `deriveTrainingMax(...)`, `lastUpdated` = today, `history: []`, **`auto: true`**.
+  2. **Auto-raise**: an existing TM with `auto: true` is silently raised when a higher e1RM appears (fold through `foldTrainingMax`, keep its `trainingMaxPercent`, then re-add `auto: true` because `foldTrainingMax` returns an entry without it). Exception: when two spellings merge into a TM created in the *same pass*, the entry is overwritten instead of folded — folding would push a same-day history entry and a bogus "+X lb since today" delta.
+  3. **Manual TMs are never touched automatically:** a TM without `auto: true` (created/edited by the user via the TM modal, `saveTrainingMax`, or the cycle rollover) keeps today's behaviour: raises are only *suggested* in the modal.
+  4. **No duplicates**: resolve against the TM map exactly like `resolveTMKey` does (logged `tmLink` → exact → case-insensitive → `findSimilarExercise`), and resolve against the map **as it is being built**, so "DB Bench" and "Dumbbell Bench Press" in the logs produce ONE TM. The fuzzy step additionally requires `sameEquipment()` (matching dumbbell/barbell/cable/machine/… tokens, none counting as its own kind) — plain Jaccard says "Bench Press" ≈ "Dumbbell Bench Press", which is tolerable in a confirm modal but would silently raise a dumbbell TM with a barbell 1RM. Exercise groups are processed sorted by session count descending so the most-used spelling becomes the key.
+- **Implementation:** `buildAutoTrainingMaxes(logs, tmMap, today)` (module-level, pure, called by effect on `workoutLogs` change) returns `{ map, changed }` (`changed` lists new/raised TMs; nothing consumes it yet — the effect only uses `map`). `mergeExercises` keeps the merged TM `auto` only if every merged entry was auto — one manual TM in the cluster makes the result manual. Returns the original `tmMap` reference when nothing changed (stops the effect from looping). This backfills existing users on first load and handles every later save, import, merge and rename. Cloud sync / localStorage pick it up through the existing effects — **no Supabase migration**.
+- **UI:** Progress → Training Maxes cards show a small purple **"Auto"** badge next to auto TMs, with title explaining they auto-raise on new e1RMs but can be edited to take manual control. Template editor `% of TM` preview uses `lookupTrainingMax()` (case-insensitive) instead of exact-key lookup, and shows a "Similar TM: {key}" **Link** button (sets the exercise's `tmLink`) when only a fuzzy match exists. With no `% of TM` entered it still shows `TM X lb`, so you can see which exercises are ready to program by percentage.
+- **Backward compatible:** existing users with manual TMs continue as-is; those TMs never get the `auto` flag. Export/import carry the flag for free.
 
 ### Cycle Rollover (v3.0)
 - **The problem it solves:** template weights are derived from `trainingMax`, so a cycle programmed at 65% kept auto-filling the same 212 lb forever. `buildTMSuggestions()` only fires per-save and only on a new 1RM, so an exercise trained hard without a PR never moved. Starting a new cycle now rolls the training maxes forward, which is what makes each cycle heavier than the last.
@@ -212,7 +227,7 @@ trainingMaxes = {
 - **Per-cycle snapshots:** the same `setBlockMetadata` update stores `trainingMaxSnapshot` (via `snapshotTrainingMaxes()`, which drops `history`) on both the finishing block (pre-apply values, never overwriting an existing snapshot) and the new one (post-apply). Rides the existing `block_metadata` JSONB column — **no migration**, and export/import carry it for free. The `trainingMaxByCycle` memo reads them back into a `C1 212.5 → C2 230` line on each Progress → Training Maxes card (consecutive equal values collapse).
 - **Modal:** clone of the TM-suggestion modal with per-row checkboxes *and* an editable New TM field per row; an edited TM is back-derived into a 1RM on apply. **Skip** starts the cycle changing nothing.
 - **Shared resolution:** `resolveTMKey(name, tmLink, tmKeys)` (`tmLink` → exact → case-insensitive → `findSimilarExercise`) is now used by both `buildTMSuggestions()` and the rollover, so the per-save and per-cycle paths agree. `lookupTrainingMax()` gives `getPercentageWeight()`/`getBest1RM()` the same case-insensitive fallback the log-view %TM badge always had — without it a template exercise spelled "bench press" silently auto-filled nothing against a "Bench Press" TM.
-- `roundToNearest2_5`, `deriveTrainingMax`, `foldTrainingMax`, `cycleIncrementFor` and `snapshotTrainingMaxes` are **module-level and pure** (top of App.jsx, next to `performedSets`); `saveTrainingMax` is now a one-line wrapper over `foldTrainingMax`.
+- `estimate1RM`, `roundToNearest2_5`, `deriveTrainingMax`, `foldTrainingMax`, `buildAutoTrainingMaxes`, `cycleIncrementFor` and `snapshotTrainingMaxes` are **module-level and pure** (top of App.jsx, next to `performedSets`); `saveTrainingMax` is now a one-line wrapper over `foldTrainingMax`.
 
 ### Planning ahead (v3.1)
 - **The problem it solves:** setting up a future day's weights required Save Workout, which writes a real log — hijacking `getNextUpSlot`/"Next up" (it jumps past the planned day), the opening week (a stored week ahead of the logs used to win, so peeking at a future week stuck the app there), PRs and TM suggestions (recorded from weights never actually lifted), "last session" (the planned day shows up as history), and the session clock (planning time got stamped as `durationSeconds`). A **plan** is a separate concept: exercises saved for a day, without any of that.
