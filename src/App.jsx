@@ -77,6 +77,26 @@ const readWeekMirror = (blockNum) => {
   } catch { return null; }
 };
 
+// Marker for "this device committed something the cloud hasn't confirmed yet". Set when a
+// logged-in user saves a workout or plan, cleared only after a successful upsert. While it is
+// set, the load path prefers localStorage over the cloud row — otherwise a save whose upload
+// failed (no signal at the gym) is overwritten by the stale cloud copy on the next launch.
+// Value is `${userId}|${timestamp}` so one account's marker never applies to another.
+const SYNC_PENDING_KEY = 'cloud-sync-pending';
+const readSyncPending = () => {
+  try { return localStorage.getItem(SYNC_PENDING_KEY); } catch { return null; }
+};
+const markSyncPending = (userId) => {
+  try { localStorage.setItem(SYNC_PENDING_KEY, `${userId}|${Date.now()}`); } catch { /* ignore */ }
+};
+// Clear only if the marker is still the one that was current when the upload started — a save
+// made while that request was in flight must keep its own marker.
+const clearSyncPending = (token) => {
+  try {
+    if (token && localStorage.getItem(SYNC_PENDING_KEY) === token) localStorage.removeItem(SYNC_PENDING_KEY);
+  } catch { /* ignore */ }
+};
+
 // Which week to open on. getNextUpSlot alone returns week 1 for any block with no logs yet,
 // which is how a cycle that hadn't been saved to in a while kept reopening on Week 1 — so with
 // no logs, the stored week wins whenever it's ahead of what the logs imply. But once the block
@@ -598,6 +618,7 @@ const WorkoutTracker = () => {
   const [footerTick, setFooterTick] = useState(0); // forces the "N min ago" footer text to refresh
   const openedSnapshotRef = useRef(null); // JSON snapshot of exercises/logDate when the day was opened — dirty-checked against
   const draftDebounceRef = useRef(null);
+  const autoResumeTriedRef = useRef(false); // the resume-after-reload check runs once per page load
   const [draggedExIdx, setDraggedExIdx] = useState(null);
   const [dragOverExIdx, setDragOverExIdx] = useState(null);
   const [draggedTemplateEx, setDraggedTemplateEx] = useState(null);
@@ -1118,9 +1139,12 @@ const WorkoutTracker = () => {
           } else if (error) {
             throw error;
           } else {
-            // Always prefer cloud data
+            // Prefer cloud data — unless this device has a committed save the cloud never
+            // confirmed (see SYNC_PENDING_KEY). Then local is newer: load it, and the autosave
+            // effect pushes it up and clears the marker.
             const hasCloudData = data.workout_logs && Object.keys(data.workout_logs).length > 0;
-            if (hasCloudData) {
+            const localIsAhead = hadData && (readSyncPending() || '').startsWith(`${user.id}|`);
+            if (hasCloudData && !localIsAhead) {
               loadFromCloud(data);
               hadData = true;
             } else {
@@ -1239,6 +1263,7 @@ const WorkoutTracker = () => {
   // Debounced save to Supabase
   const upsertToSupabase = useCallback(async () => {
     if (!user || !supabase) return;
+    const pendingToken = readSyncPending(); // captured before the request so a later save isn't cleared by it
     try {
       const { error } = await supabase
         .from('user_data')
@@ -1253,6 +1278,7 @@ const WorkoutTracker = () => {
         });
 
       if (error) throw error;
+      clearSyncPending(pendingToken);
     } catch (error) {
       console.error('Error saving to Supabase:', error);
     }
@@ -1517,6 +1543,25 @@ const WorkoutTracker = () => {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // Resume after a reload: phones routinely reload the page while it sits behind a locked
+  // screen mid-workout. If a session clock is still running for a day in this cycle whose draft
+  // has sets checked off and was touched in the last 3 hours, go straight back into that day
+  // instead of the Calendar. This never STARTS a clock (startSessionFor leaves a timer with the
+  // same logKey untouched), so the "don't auto-open on launch" rule still holds for every
+  // ordinary launch. Runs once per page load.
+  React.useEffect(() => {
+    if (!dataLoaded || autoResumeTriedRef.current) return;
+    autoResumeTriedRef.current = true;
+    if (view !== 'calendar' || !sessionTimer?.running || sessionTimer.seeded) return;
+    const slot = parseLogKey(sessionTimer.logKey);
+    if (!slot || slot.block !== currentBlock || workoutLogs[sessionTimer.logKey]) return;
+    const draft = readDrafts()[sessionTimer.logKey];
+    if (!draft || !draft.savedAt || Date.now() - draft.savedAt > 3 * 60 * 60 * 1000) return;
+    if (!(draft.exercises || []).some(ex => (ex.sets || []).some(s => s.completed))) return;
+    loadDayIntoLogView(slot.day, { week: slot.week });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [dataLoaded]);
+
   // Debounced draft write — skipped until the exercises/date actually differ from what the day
   // was opened with, so simply opening and closing a log without editing it writes nothing.
   React.useEffect(() => {
@@ -1586,11 +1631,15 @@ const WorkoutTracker = () => {
     return () => clearInterval(id);
   }, [view]);
 
-  // Accordion defaults to the first exercise expanded whenever a new day's log is opened
-
-  // Accordion defaults to the first exercise expanded whenever a new day's log is opened
+  // Whenever a day's log is opened, expand the first exercise that still has an unchecked set —
+  // so coming back mid-workout (from another tab, a restored draft, or a reload) lands on the
+  // exercise you're actually on, not exercise 1. Falls back to the first exercise when nothing
+  // is checked off yet, or everything is.
   React.useEffect(() => {
-    if (view === 'log') setExpandedExIdx(0);
+    if (view !== 'log') return;
+    const firstUnfinished = exercises.findIndex(ex => (ex.sets || []).some(s => !s.completed));
+    setExpandedExIdx(firstUnfinished === -1 ? 0 : firstUnfinished);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [view, selectedDay]);
 
   // Cardio Utility Functions
@@ -2312,6 +2361,15 @@ const WorkoutTracker = () => {
 
   const handleLogout = async () => {
     if (!supabase) return;
+    // Logout wipes the local cache. If the last save never reached the cloud, try once more,
+    // and if it still hasn't landed, make the user confirm before it's destroyed. The retry is
+    // capped at 5s so a hung request on a flaky connection can't leave the button unresponsive.
+    if (readSyncPending()) {
+      await Promise.race([upsertToSupabase(), new Promise(resolve => setTimeout(resolve, 5000))]);
+      if (readSyncPending() && !window.confirm(
+        "Your latest workout hasn't synced to the cloud yet. Signing out now will remove it from this device. Sign out anyway?"
+      )) return;
+    }
     await supabase.auth.signOut();
     localStorage.removeItem('workout-logs');
     localStorage.removeItem('workout-blocks');
@@ -2320,6 +2378,7 @@ const WorkoutTracker = () => {
     localStorage.removeItem('current-week');
     localStorage.removeItem('block-metadata');
     localStorage.removeItem('training-maxes');
+    localStorage.removeItem(SYNC_PENDING_KEY);
   };
 
   // Days shown on the Calendar: any day defined in the template, or that has a log this week
@@ -2918,6 +2977,9 @@ const WorkoutTracker = () => {
       return; // draft kept, PRs not recorded, timers still running, no navigation
     }
 
+    // Local write is verified; flag it as not-yet-in-the-cloud until an upsert succeeds.
+    if (user && supabase) markSyncPending(user.id);
+
     // Functional updates: the old closure spreads dropped concurrent changes, and folding PRs
     // over an accumulator is what makes every exercise's PRs survive instead of just the last.
     setWorkoutLogs(prev => ({ ...prev, [logKey]: entry }));
@@ -2984,6 +3046,7 @@ const WorkoutTracker = () => {
       sets: ex.sets.map(({ completed, weightSource, ...set }) => set)
     }));
     savePlan(currentBlock, currentWeek, selectedDay, exercisesToSave);
+    if (user && supabase) markSyncPending(user.id);
 
     deleteDraft(currentLogKey);
     setDraftSavedAt(null);

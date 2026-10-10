@@ -133,6 +133,7 @@ trainingMaxes = {
 - `getPlan(block, week, day)` / `savePlan(block, week, day, exercises)` / `deletePlan(block, week, day)`: Read/write/remove a single plan, all via functional `setBlockMetadata` updates
 - `todayLocalISO()`: Today's LOCAL `YYYY-MM-DD` — use instead of `toISOString().split('T')[0]`, which is UTC
 - `resolveStartWeek()` / `parseLogKey()` / `earliestDateForBlock()` / `readWeekMirror()`: module-level helpers next to `getNextUpSlot`
+- `readSyncPending()` / `markSyncPending(userId)` / `clearSyncPending(token)`: module-level helpers next to `readWeekMirror` for the `cloud-sync-pending` marker (see Unsynced-save marker v3.3)
 - `getAllExerciseHistory()`: Get all-time exercise history across all blocks
 - `getAllExerciseNames()`: Get unique exercise names for fuzzy search
 - `handleAuth()`: Email/password login or signup via Supabase
@@ -174,7 +175,7 @@ trainingMaxes = {
 
 ### "Next up" landing (v2.8)
 - `getNextUpSlot(blockNum, logs, template)` (module-level, next to `ALL_DAYS`) returns `{ week, day }` for the training slot **immediately after** the most recently saved workout: it walks forward from the day after the last logged one and returns the first slot that is both unlogged and actually planned in the template, rolling into the next week when a week is finished (last save Friday → next Monday). Falls back to plain weekday order when the template is empty, and caps the scan at 4 weeks so a fully-logged cycle can't spin. No logs in the cycle → `{ week: 1, first planned day }`.
-- A `nextUpSlot` memo drives a green **"Next up"** badge + emerald ring on that day's Calendar card. It's derived from `workoutLogs`, so it advances on its own as soon as a workout is saved. The app deliberately does **not** auto-open the log view — that would start the session clock on every app launch.
+- A `nextUpSlot` memo drives a green **"Next up"** badge + emerald ring on that day's Calendar card. It's derived from `workoutLogs`, so it advances on its own as soon as a workout is saved. The app deliberately does **not** auto-open the log view — that would start the session clock on every app launch. One exception (v3.3): after a page reload, if a session clock is still **running** for a day in the current cycle whose draft has completed sets and was written in the last 3 hours, a once-per-load effect (`autoResumeTriedRef`) calls `loadDayIntoLogView` for it. It never starts a clock — `startSessionFor` leaves a timer with the same `logKey` untouched.
 
 ### Week tracking (v2.9)
 - `getNextUpSlot` alone is **not** enough to pick the opening week: it returns week 1 for any cycle with zero logs, so a cycle that hadn't been saved to reopened on Week 1 every time. The week is now persisted.
@@ -267,6 +268,9 @@ Guest mode:  React State ←→ localStorage (auto-save on state change)
 Logged in:   React State ←→ localStorage (cache) + Supabase (cloud, debounced 1s)
 ```
 
+### Unsynced-save marker (v3.3)
+`upsertToSupabase` swallows failures, and the load path prefers the cloud row — so a workout saved with no signal used to be overwritten by the stale cloud copy on the next launch. `handleSaveWorkout` / `handleSavePlan` now call `markSyncPending(user.id)` (logged-in only), writing localStorage key `cloud-sync-pending` = `` `${userId}|${timestamp}` ``. `upsertToSupabase` captures the marker before the request and `clearSyncPending(token)` removes it only on success and only if it is unchanged. While the marker belongs to the signed-in user, `loadData` calls `loadFromLocalStorage()` instead of `loadFromCloud()`; the post-load autosave then pushes local up and clears it. `handleLogout` retries the upload (capped at 5s) and asks for confirmation before wiping an unsynced save. Never set the marker in guest mode or from the upsert's catch — an offline launch would then let a device that changed nothing overwrite the cloud.
+
 ## UI Conventions
 - Dark theme (gray-900 background)
 - Color coding:
@@ -283,7 +287,7 @@ Logged in:   React State ←→ localStorage (cache) + Supabase (cloud, debounce
 - Notes field is collapsible in log view (shows `+ Add note` when empty)
 
 ## Logging Screen (mobile-first, v2.5)
-- Exercise cards in the log view are an **accordion** (`expandedExIdx` state, single index, `null` = all collapsed). Opening a new day's log defaults to expanding the first exercise. Adding an exercise expands it; removing one re-targets `expandedExIdx` to stay valid.
+- Exercise cards in the log view are an **accordion** (`expandedExIdx` state, single index, `null` = all collapsed). Opening a day's log expands the first exercise that still has an unchecked set (falls back to the first exercise) — so returning mid-workout lands on the exercise in progress. Adding an exercise expands it; removing one re-targets `expandedExIdx` to stay valid.
 - Collapsed card = one row: reorder arrows (mobile only, `moveExercise(idx, direction)` swaps neighbors since HTML5 drag doesn't work on touch) / `GripVertical` drag handle (desktop only, `md:` breakpoint), name, `ExerciseTypeBadge`, template target, `completed/total` set count, chevron. Tap the row to expand/collapse.
 - Set rows are a CSS grid (`grid-cols-[2.25rem_1fr_1fr_2rem]` for strength/bodyweight; wider variants for cardio/tabata), not `flex flex-wrap` — this is what keeps one set to one row on a 375px screen.
 - `NumberField` (module-level component, alongside `ExerciseTypeBadge`/`ModalHeader`) is the `− [input] +` stepper used for every numeric set field; the `%TM` badge and the improved/matched comparison arrow moved out of the input row into a sub-line beneath it.
@@ -331,6 +335,7 @@ Logged in:   React State ←→ localStorage (cache) + Supabase (cloud, debounce
 - `rest-timer`: The single active rest timer, if any — `{ exIdx, setIdx, exName, endsAt, running, remainingMs, _savedAt }`; dropped on restore if `_savedAt` is over 10 minutes old
 - `rest-timer-muted`: `"true"` / `"false"` — rest timer completion sound preference
 - `workout-session-timer`: The active per-day session clock, if any — `{ logKey, startedAt, accumulatedMs, running, seeded }`; cleared on Save Workout; a restored *running* timer over 6 hours elapsed is paused, not dropped
+- `cloud-sync-pending`: `"<userId>|<timestamp>"` while a logged-in save hasn't been confirmed by Supabase; makes the next load prefer localStorage over the cloud row. Removed on successful upsert and on logout.
 
 ### Supabase `user_data` Table (when logged in)
 | Column | Type | Purpose |
