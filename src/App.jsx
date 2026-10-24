@@ -4856,8 +4856,24 @@ const WorkoutTracker = () => {
                             </span>
                           )}
                           {log?.date && (
-                            <span className="text-xs text-gray-400 bg-gray-700/50 px-2 py-1 rounded">
+                            <span className="text-xs text-gray-400 bg-gray-700/50 px-2 py-1 rounded shrink-0">
                               {formatDate(log.date)}
+                            </span>
+                          )}
+                          {log && typeof log.durationSeconds === 'number' && log.durationSeconds > 0 && (
+                            <span
+                              className="text-xs text-gray-400 bg-gray-700/50 px-2 py-0.5 rounded shrink-0"
+                              title="Session time"
+                            >
+                              {formatSecondsToTime(log.durationSeconds)}
+                            </span>
+                          )}
+                          {log && log.prsHit > 0 && (
+                            <span
+                              className="text-xs px-2 py-0.5 bg-yellow-900/50 text-yellow-400 rounded shrink-0"
+                              title={`${log.prsHit} personal record${log.prsHit !== 1 ? 's' : ''} hit`}
+                            >
+                              {log.prsHit === 1 ? '1 PR' : `${log.prsHit} PRs`}
                             </span>
                           )}
 
