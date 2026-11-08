@@ -1,0 +1,90 @@
+{
+  "pureOk": true,
+  "e2eResults": [
+    {
+      "id": "1-copy-last-notes",
+      "pass": true,
+      "run": "Opened week-2 Wednesday with week-1 Bench history; clicked Copy Last",
+      "observed": "textarea notes=\"prior-session-note\""
+    },
+    {
+      "id": "1-rename-clears-notes",
+      "pass": true,
+      "run": "Renamed exercise to Incline Bench Press (different name)",
+      "observed": "notes cleared (textarea values: \"\")"
+    },
+    {
+      "id": "2-saved-log-no-running-clock",
+      "pass": true,
+      "run": "Opened saved block1-week1-monday from calendar",
+      "observed": "no running timer (react=null)"
+    },
+    {
+      "id": "2-duration-preserved-on-log",
+      "pass": true,
+      "run": "Saved log review: calendar duration badge + durationSeconds in state",
+      "observed": "calendar 10:00=true; durationSeconds=600; running timer=null"
+    },
+    {
+      "id": "3-browser-pure-fold",
+      "pass": true,
+      "run": "page.evaluate __wtPure.foldTrainingMax",
+      "observed": "{\"manualSource\":\"manual\",\"lenAfterCycleFold\":1,\"tm\":215,\"expectedLen\":1}"
+    },
+    {
+      "id": "4-template-tm-flag",
+      "pass": true,
+      "run": "Template tab, Mystery Press 70% without TM",
+      "observed": "found 1 \"Needs Linked TM\" label(s)"
+    },
+    {
+      "id": "4-wave-needs-tm",
+      "pass": true,
+      "run": "Weekly progression row for week 3 without TM",
+      "observed": "wave column \"needs TM\" count=1 (Squat week3 75% has no TM in fixture)"
+    },
+    {
+      "id": "4-rollover-modal-week-preview",
+      "pass": true,
+      "run": "Synthetic trained Squat + TM; clicked New Cycle; read modal DOM",
+      "observed": "visible line \"Wk 3 75% → 210 lb\" in modal"
+    },
+    {
+      "id": "2-plan-day-no-timer",
+      "pass": true,
+      "run": "testhooks loadDayIntoLogView(friday, week 2) with blockMetadata plan week2-friday",
+      "observed": "plan banner/content=true; timer block1-week2-friday running=false; before=null, after=null"
+    },
+    {
+      "id": "2-draft-history-review-no-timer",
+      "pass": true,
+      "run": "Saved log exists but newer draft without completed sets; open Monday (draft restore path)",
+      "observed": "draft banner=true; timer running for block1-week1-monday=false; react=null"
+    },
+    {
+      "id": "5-loading-gate",
+      "pass": true,
+      "run": "Playwright waitForSelector(Syncing your workouts) during guest fixture load",
+      "observed": "spinner seen=true, shows Offline Fixture Cycle=true, wrong Training Cycle 1 only=false"
+    },
+    {
+      "id": "5-metadata-title-after-load",
+      "pass": true,
+      "run": "Guest load from localStorage block-metadata name",
+      "observed": "calendar shows Offline Fixture Cycle (not default Training Cycle 1)"
+    },
+    {
+      "id": "6-week-header-prescription",
+      "pass": true,
+      "run": "Calendar week 3 monday card",
+      "observed": "monday card contains \"5×3 @ 75%\""
+    },
+    {
+      "id": "6-merge-data-preservation",
+      "pass": true,
+      "run": "testhooks mergeExercises(db bench → Dumbbell Bench Press)",
+      "observed": "{\"logName\":\"Dumbbell Bench Press\",\"logNotes\":\"merge-me\",\"planName\":\"Dumbbell Bench Press\",\"snapKeys\":[\"Dumbbell Bench Press\"],\"draftName\":\"Dumbbell Bench Press\",\"draftNotes\":\"draft-preserved\",\"tmKeys\":[\"Dumbbell Bench Press\"],\"prDbGone\":true}"
+    }
+  ],
+  "at": "2026-11-08T00:46:30.140Z"
+}
