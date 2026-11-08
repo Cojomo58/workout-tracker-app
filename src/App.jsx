@@ -185,12 +185,19 @@ const deriveTrainingMax = (true1RM, pct) =>
   roundToNearest2_5(parseFloat(true1RM) * parseFloat(pct) / 100);
 
 // Fold one training max into a TM map and return a NEW map. `history` is append-only and holds
-// PREVIOUS values, so history[0] stays the oldest entry (the Progress delta line depends on that).
-const foldTrainingMax = (prevMap, exerciseName, true1RM, pct, today) => {
+// PREVIOUS values with optional `source` (`manual` | `auto` | `cycle`). Cycle rollovers skip history
+// — those belong in blockMetadata.trainingMaxSnapshot, not the dated TM log.
+const foldTrainingMax = (prevMap, exerciseName, true1RM, pct, today, opts = {}) => {
+  const { recordHistory = true, historySource = 'manual' } = opts;
   const existing = prevMap[exerciseName];
   const prevHistory = existing?.history || [];
-  const newHistory = existing
-    ? [...prevHistory, { true1RM: existing.true1RM, trainingMax: existing.trainingMax, date: existing.lastUpdated || today }]
+  const newHistory = existing && recordHistory
+    ? [...prevHistory, {
+        true1RM: existing.true1RM,
+        trainingMax: existing.trainingMax,
+        date: existing.lastUpdated || today,
+        source: historySource
+      }]
     : prevHistory;
   return {
     ...prevMap,
@@ -202,6 +209,19 @@ const foldTrainingMax = (prevMap, exerciseName, true1RM, pct, today) => {
       history: newHistory
     }
   };
+};
+
+// Sets/reps/% for a template exercise on a given week (weeklyProgression overrides base fields).
+const prescriptionForWeek = (ex, week) => {
+  if (!ex) return { sets: null, reps: null, pct: null, label: null };
+  const weekOverride = (ex.weeklyProgression || []).find(w => w.week === week) ?? null;
+  const sets = weekOverride?.sets ?? ex.sets;
+  const reps = weekOverride?.reps ?? ex.reps;
+  const pct = weekOverride?.percentage ?? ex.percentage;
+  let label = null;
+  if (sets && reps) label = `${sets}×${reps}`;
+  if (pct) label = label ? `${label} @ ${pct}%` : `${pct}% TM`;
+  return { sets, reps, pct, label };
 };
 
 // Standard cycle increment for an exercise that produced no new e1RM. Lower body moves in bigger
@@ -300,7 +320,7 @@ const buildAutoTrainingMaxes = (logs, tmMap, today) => {
         // would push a same-day history entry and show a bogus "+X lb since today" delta.
         map[key] = { ...existing, true1RM: group.best, trainingMax: deriveTrainingMax(group.best, existing.trainingMaxPercent) };
       } else {
-        const folded = foldTrainingMax(map, key, group.best, existing.trainingMaxPercent, today)[key];
+        const folded = foldTrainingMax(map, key, group.best, existing.trainingMaxPercent, today, { historySource: 'auto' })[key];
         map[key] = { ...folded, auto: true }; // foldTrainingMax writes a fresh entry without the flag
       }
       changed.push({ name: key, isNew: false, true1RM: group.best });
@@ -1715,7 +1735,7 @@ const WorkoutTracker = () => {
   };
 
   const saveTrainingMax = (exerciseName, true1RM, pct = DEFAULT_TM_PERCENT) => {
-    setTrainingMaxes(prev => foldTrainingMax(prev, exerciseName, true1RM, pct, todayLocalISO()));
+    setTrainingMaxes(prev => foldTrainingMax(prev, exerciseName, true1RM, pct, todayLocalISO(), { historySource: 'manual' }));
   };
 
   // Rep-to-TM-percentage lookup (standard powerlifting percentage chart)
@@ -1738,6 +1758,13 @@ const WorkoutTracker = () => {
   const renameExercise = (oldName, newName) => {
     if (!newName.trim() || newName.trim() === oldName) return;
     const n = newName.trim();
+    const conflict = allKnownExerciseNames.find(
+      k => k.toLowerCase().trim() === n.toLowerCase() && k !== oldName
+    );
+    if (conflict) {
+      mergeExercises([oldName], conflict);
+      return;
+    }
     // Rename in all workout logs
     setWorkoutLogs(prev => {
       const updated = {};
@@ -2683,6 +2710,32 @@ const WorkoutTracker = () => {
       }
       // Derive the TM exactly the way saving will, so the modal shows what actually gets stored.
       row.newTrainingMax = deriveTrainingMax(row.newTrue1RM, pct);
+      const previewLoads = [];
+      const targetLower = resolvedKey.toLowerCase().trim();
+      Object.values(blocks[0]?.template || {}).forEach(day => {
+        (day.exercises || []).forEach(ex => {
+          if (!ex.name) return;
+          const linkKey = String(ex.tmLink || ex.name).toLowerCase().trim();
+          if (linkKey !== targetLower) return;
+          if (ex.percentage) {
+            previewLoads.push({
+              week: 'base',
+              pct: ex.percentage,
+              weight: roundToNearest2_5(row.newTrainingMax * ex.percentage / 100)
+            });
+          }
+          (ex.weeklyProgression || []).forEach(w => {
+            if (w.percentage) {
+              previewLoads.push({
+                week: w.week,
+                pct: w.percentage,
+                weight: roundToNearest2_5(row.newTrainingMax * w.percentage / 100)
+              });
+            }
+          });
+        });
+      });
+      row.previewLoads = previewLoads;
       rows.push(row);
       used.add(resolvedKey.toLowerCase());
       if (targetKey) matchedTMKeys.add(targetKey);
@@ -2703,7 +2756,7 @@ const WorkoutTracker = () => {
     const today = todayLocalISO();
     const beforeTMs = trainingMaxes;
     const nextTMs = rowsToApply.reduce(
-      (acc, r) => foldTrainingMax(acc, r.targetKey, r.newTrue1RM, r.pct, today),
+      (acc, r) => foldTrainingMax(acc, r.targetKey, r.newTrue1RM, r.pct, today, { recordHistory: false }),
       beforeTMs
     );
     if (rowsToApply.length > 0) setTrainingMaxes(nextTMs);
@@ -2800,6 +2853,50 @@ const WorkoutTracker = () => {
       );
       return nb;
     });
+    setBlockMetadata(prev => {
+      const updated = { ...prev };
+      Object.entries(updated).forEach(([blockKey, meta]) => {
+        if (!meta) return;
+        let nextMeta = meta;
+        const plans = meta.plans;
+        if (plans) {
+          const newPlans = {};
+          Object.entries(plans).forEach(([pk, plan]) => {
+            newPlans[pk] = {
+              ...plan,
+              exercises: (plan.exercises || []).map(ex =>
+                sources.has(ex.name) ? { ...ex, name: toName } : ex
+              )
+            };
+          });
+          nextMeta = { ...nextMeta, plans: newPlans };
+        }
+        const snap = meta.trainingMaxSnapshot;
+        if (snap) {
+          const newSnap = { ...snap };
+          sources.forEach(src => {
+            if (newSnap[src]) {
+              newSnap[toName] = { ...newSnap[src], ...(newSnap[toName] || {}) };
+              delete newSnap[src];
+            }
+          });
+          nextMeta = { ...nextMeta, trainingMaxSnapshot: newSnap };
+        }
+        if (nextMeta !== meta) updated[blockKey] = nextMeta;
+      });
+      return updated;
+    });
+    const drafts = readDrafts();
+    let draftsTouched = false;
+    Object.values(drafts).forEach(draft => {
+      (draft.exercises || []).forEach(ex => {
+        if (sources.has(ex.name)) {
+          ex.name = toName;
+          draftsTouched = true;
+        }
+      });
+    });
+    if (draftsTouched) writeDraftsObject(drafts);
   };
 
   const calculateVolume = (sets) => {
@@ -3077,17 +3174,13 @@ const WorkoutTracker = () => {
     setDraftSavedAt(null); // avoid showing the previous day's "Saved Ns ago" until this one autosaves
     setPlanBanner(null);
 
-    // Start/restore the session clock up front — both the early-return draft-restore branch below
-    // and the normal load path must get it, and re-opening an already-saved day should seed it
-    // paused with the recorded duration rather than starting a fresh running clock. But never for
-    // a day being merely planned ahead of schedule (after nextUpSlot, no log yet) — the planning
-    // time itself isn't workout time, and Save Plan doesn't write a durationSeconds anywhere.
-    const existingLogForClock = workoutLogs[logKey];
     const isAheadOfNextUp = week > nextUpSlot.week ||
       (week === nextUpSlot.week && ALL_DAYS.indexOf(day) > ALL_DAYS.indexOf(nextUpSlot.day));
-    if (existingLogForClock || !isAheadOfNextUp) {
-      startSessionFor(logKey, existingLogForClock?.durationSeconds);
-    }
+
+    const maybeStartSessionClock = (savedDurationSeconds) => {
+      if (isAheadOfNextUp) return;
+      startSessionFor(logKey, savedDurationSeconds);
+    };
 
     if (!skipDraft) {
       const draft = readDrafts()[logKey];
@@ -3103,6 +3196,7 @@ const WorkoutTracker = () => {
         setPrefilled(false);
         setDraftBanner({ savedAt: draft.savedAt });
         setDraftSavedAt(draft.savedAt);
+        if (draftHasCompletedSets) maybeStartSessionClock(workoutLogs[logKey]?.durationSeconds);
         setView('log');
         return;
       }
@@ -3160,9 +3254,13 @@ const WorkoutTracker = () => {
             name: ex.name,
             type: exType,
             technique: ex.technique,
-            templateTarget: (effectiveSets && effectiveReps)
-              ? `${effectiveSets}×${effectiveReps}`
-              : (tmplEx ? `${tmplEx.sets}×${tmplEx.reps}` : null),
+            templateTarget: prescriptionForWeek(tmplEx ? {
+              ...tmplEx,
+              sets: effectiveSets ?? tmplEx.sets,
+              reps: effectiveReps ?? tmplEx.reps,
+              percentage: effectivePct ?? tmplEx.percentage,
+            } : { sets: effectiveSets, reps: effectiveReps, percentage: effectivePct }, week).label
+              || (tmplEx ? `${tmplEx.sets}×${tmplEx.reps}` : null),
             templatePercentage: effectivePct || tmplEx?.percentage || null,
             templateReps: effectiveReps || tmplEx?.reps || null,
             templateRest: tmplEx?.rest || null,
@@ -3204,7 +3302,12 @@ const WorkoutTracker = () => {
             name: ex.name,
             type: exType,
             technique: ex.technique,
-            templateTarget: (effectiveSets && effectiveReps) ? `${effectiveSets}×${effectiveReps}` : null,
+            templateTarget: prescriptionForWeek({
+              ...ex,
+              sets: effectiveSets,
+              reps: effectiveReps,
+              percentage: effectivePct,
+            }, week).label,
             templatePercentage: effectivePct || null,
             templateReps: effectiveReps || null,
             templateRest: ex.rest || null,
@@ -3219,6 +3322,7 @@ const WorkoutTracker = () => {
         }) || []);
         setPrefilled(false);
       }
+      maybeStartSessionClock(undefined);
     }
     setView('log');
   };
@@ -3357,6 +3461,13 @@ const WorkoutTracker = () => {
       </div>
 
       <div className="bg-gray-800 rounded-lg shadow-xl p-4 md:p-6 border border-gray-700">
+        {(authLoading || !dataLoaded) ? (
+          <div className="flex flex-col items-center justify-center py-20 gap-3" role="status" aria-live="polite">
+            <RefreshCw className="w-9 h-9 text-emerald-400 animate-spin" aria-hidden="true" />
+            <p className="text-gray-400 text-sm">{authLoading ? 'Checking sign-in…' : 'Syncing your workouts…'}</p>
+          </div>
+        ) : (
+        <>
         {/* Progress View - showing condensed version */}
         {view === 'progress' && (
           <div className="space-y-6">
@@ -3984,7 +4095,8 @@ const WorkoutTracker = () => {
                       {Object.entries(trainingMaxes)
                         .filter(([name]) => name.toLowerCase().includes(tmFilter.toLowerCase()))
                         .map(([name, tm]) => {
-                          const startTM = tm.history && tm.history.length > 0 ? tm.history[0].trainingMax : null;
+                          const manualHistory = (tm.history || []).filter(h => !h.source || h.source === 'manual');
+                          const startTM = manualHistory.length > 0 ? manualHistory[0].trainingMax : null;
                           const delta = startTM !== null ? Math.round((tm.trainingMax - startTM) * 10) / 10 : null;
                           return (
                             <div key={name} className="flex items-center justify-between p-3 bg-gray-900/50 rounded-lg border border-gray-700">
@@ -3999,7 +4111,7 @@ const WorkoutTracker = () => {
                                 </p>
                                 {delta !== null && delta !== 0 && (
                                   <p className={`text-xs mt-0.5 font-medium ${delta > 0 ? 'text-emerald-400' : 'text-red-400'}`}>
-                                    {delta > 0 ? '+' : ''}{delta} lb since {tm.history[0].date}
+                                    {delta > 0 ? '+' : ''}{delta} lb since {manualHistory[0].date}
                                   </p>
                                 )}
                                 {(() => {
@@ -4488,7 +4600,13 @@ const WorkoutTracker = () => {
                                               </div>
                                             );
                                           }
-                                          if (exercise.percentage && !tm) return <p className="text-xs text-gray-500 mt-1">No TM yet — log this exercise once</p>;
+                                          if (exercise.percentage && !tm) {
+                                            return (
+                                              <p className="text-xs text-amber-400 mt-1" title="Set Linked TM or log once so percentage weights can be calculated">
+                                                Needs Linked TM — no training max resolves for {exercise.percentage}%
+                                              </p>
+                                            );
+                                          }
                                           return null;
                                         })()}
                                       </div>
@@ -4582,11 +4700,14 @@ const WorkoutTracker = () => {
                                         }}
                                         className="w-full px-1 py-0.5 bg-gray-700 border border-gray-600 rounded-lg text-gray-100"
                                       />
-                                      <span className="text-purple-400 whitespace-nowrap">
+                                      <span className="whitespace-nowrap">
                                         {(() => {
                                           const tmKey = exercise.tmLink || exercise.name;
                                           const w = getPercentageWeight(tmKey, entry.percentage);
-                                          return w ? `${w} lb` : '—';
+                                          if (entry.percentage && !w) {
+                                            return <span className="text-amber-400" title="Needs Linked TM">needs TM</span>;
+                                          }
+                                          return <span className="text-purple-400">{w ? `${w} lb` : '—'}</span>;
                                         })()}
                                       </span>
                                       <button
@@ -4883,7 +5004,16 @@ const WorkoutTracker = () => {
                         </p>
                         <p className="text-xs text-gray-500 mt-1">
                           {workout?.exercises?.length > 0 ? (
-                            `${workout.exercises.length} exercise${workout.exercises.length !== 1 ? 's' : ''}`
+                            <span className="block space-y-0.5">
+                              {workout.exercises.map((ex, i) => {
+                                const rx = prescriptionForWeek(ex, currentWeek);
+                                return (
+                                  <span key={`${ex.name}-${i}`} className="block truncate" title={rx.label || undefined}>
+                                    {ex.name || 'Exercise'}{rx.label ? ` · ${rx.label}` : ''}
+                                  </span>
+                                );
+                              })}
+                            </span>
                           ) : (
                             <button
                               onClick={(e) => { e.stopPropagation(); setView('template'); }}
@@ -5219,7 +5349,12 @@ const WorkoutTracker = () => {
                           value={exercise.name}
                           onChange={(e) => {
                             const newExercises = [...exercises];
-                            newExercises[exIdx].name = e.target.value;
+                            const oldName = newExercises[exIdx].name;
+                            const nextName = e.target.value;
+                            if (oldName.trim().toLowerCase() !== nextName.trim().toLowerCase()) {
+                              newExercises[exIdx].notes = '';
+                            }
+                            newExercises[exIdx].name = nextName;
                             setExercises(newExercises);
 
                             // Generate suggestions
@@ -5245,7 +5380,11 @@ const WorkoutTracker = () => {
                             } else if (e.key === 'Enter' && activeSuggestionIndex >= 0) {
                               e.preventDefault();
                               const newExercises = [...exercises];
-                              newExercises[exIdx].name = exerciseSuggestions[activeSuggestionIndex];
+                              const pick = exerciseSuggestions[activeSuggestionIndex];
+                              if (exercise.name.trim().toLowerCase() !== pick.trim().toLowerCase()) {
+                                newExercises[exIdx].notes = '';
+                              }
+                              newExercises[exIdx].name = pick;
                               setExercises(newExercises);
                               setExerciseSuggestions([]);
                             } else if (e.key === 'Escape') {
@@ -5267,6 +5406,9 @@ const WorkoutTracker = () => {
                                 onMouseDown={(e) => {
                                   e.preventDefault();
                                   const newExercises = [...exercises];
+                                  if (exercise.name.trim().toLowerCase() !== suggestion.trim().toLowerCase()) {
+                                    newExercises[exIdx].notes = '';
+                                  }
                                   newExercises[exIdx].name = suggestion;
                                   setExercises(newExercises);
                                   setExerciseSuggestions([]);
@@ -5294,8 +5436,11 @@ const WorkoutTracker = () => {
                                 ? { distance: s.distance || '', time: s.time || '', unit: s.unit || 'miles' }
                                 : prevType === 'tabata'
                                   ? { rounds: s.rounds || '', workSeconds: s.workSeconds || '20', restSeconds: s.restSeconds || '10', calories: s.calories || '' }
-                                  : { weight: s.weight || '', reps: s.reps || '' }
+                                  : prevType === 'bodyweight'
+                                    ? { reps: s.reps || '', holdTime: s.holdTime || '' }
+                                    : { weight: s.weight || '', reps: s.reps || '' }
                             );
+                            newExercises[exIdx].notes = previousSession.notes || '';
                             setExercises(newExercises);
                           }
                         }}
@@ -5341,6 +5486,9 @@ const WorkoutTracker = () => {
                           <button
                             onClick={() => {
                               const newExercises = [...exercises];
+                              if (exercise.name.trim().toLowerCase() !== similar.name.trim().toLowerCase()) {
+                                newExercises[exIdx].notes = '';
+                              }
                               newExercises[exIdx].name = similar.name;
                               setExercises(newExercises);
                               setExerciseSuggestions([]);
@@ -6214,6 +6362,8 @@ const WorkoutTracker = () => {
             </div>
           </div>
         )}
+        </>
+        )}
       </div>
 
       {/* Save outcome. Success auto-clears; an error stays until dismissed — a failed save is
@@ -6585,6 +6735,19 @@ const WorkoutTracker = () => {
                           : <>best set {r.weight} lb &times; {r.reps} &rarr; 1RM {r.bestE1RM} lb</>}
                         {r.matchedByName && <span className="text-amber-400"> &middot; logged as "{r.exerciseName}"</span>}
                       </p>
+                      {r.previewLoads?.length > 0 && (
+                        <p className="text-xs text-purple-300/90 mt-1" title="Rounded working weights at template percentages with the new TM">
+                          {r.previewLoads.slice(0, 4).map((p, i) => (
+                            <span key={i}>
+                              {i > 0 ? ' · ' : ''}
+                              {p.week === 'base' ? 'Base' : `Wk ${p.week}`} {p.pct}% → {roundToNearest2_5(
+                                (isNaN(editedTM) ? shownTM : editedTM) * p.pct / 100
+                              )} lb
+                            </span>
+                          ))}
+                          {r.previewLoads.length > 4 && <span className="text-gray-500"> · +{r.previewLoads.length - 4} more</span>}
+                        </p>
+                      )}
                     </div>
                     <div className="shrink-0 text-right">
                       <label className="block text-[10px] text-gray-500 mb-0.5">New TM</label>
