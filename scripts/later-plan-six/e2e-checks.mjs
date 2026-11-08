@@ -11,6 +11,9 @@ import {
   storageMergeFixture,
   storageOfflineFallbackFixture,
   storageTemplateTmFlagFixture,
+  storageRolloverModalFixture,
+  storagePlanNoTimerFixture,
+  storageDraftHistoryNoTimerFixture,
   BASE_BLOCK,
 } from './fixtures.mjs';
 import fs from 'fs';
@@ -86,6 +89,91 @@ async function checkOutcome1() {
       notesAfterRename.includes('prior-session-note')
         ? 'notes still contain prior-session-note (BLEED)'
         : `notes cleared (textarea values: "${notesAfterRename}")`,
+    );
+  } finally {
+    await browser.close();
+  }
+}
+
+async function sessionTimerSnapshot(page) {
+  return page.evaluate(() => {
+    const hook = window.__wtTestHooks?.getSessionTimer?.();
+    const raw = localStorage.getItem('workout-session-timer');
+    return { react: hook, local: raw ? JSON.parse(raw) : null };
+  });
+}
+
+function timerStartedForKey(timer, logKey) {
+  if (!timer.react) return false;
+  if (timer.react.logKey !== logKey) return false;
+  return !!timer.react.running;
+}
+
+async function checkRolloverModalPreview() {
+  const { browser, page } = await newPageWithStorage(storageRolloverModalFixture());
+  try {
+    await waitForAppReady(page);
+    page.once('dialog', (d) => d.dismiss());
+    await page.getByRole('button', { name: 'New Cycle' }).click();
+    await page.waitForSelector('text=Roll Training Maxes Forward', { timeout: 8000 });
+    const modalText = await page.locator('text=Roll Training Maxes Forward').locator('..').locator('..').innerText();
+    const weekLine = modalText.match(/Wk\s*3\s*75%\s*→\s*([\d.]+)\s*lb/i);
+    const pass = !!weekLine;
+    record(
+      '4-rollover-modal-week-preview',
+      pass,
+      'Synthetic trained Squat + TM; clicked New Cycle; read modal DOM',
+      pass
+        ? `visible line "Wk 3 75% → ${weekLine[1]} lb" in modal`
+        : `no Wk 3 75% preview in modal text: ${modalText.slice(0, 400)}`,
+    );
+    fs.mkdirSync(MEDIA_DIR, { recursive: true });
+    await page.screenshot({ path: path.join(MEDIA_DIR, 'outcome-4-rollover-modal.png'), fullPage: true });
+  } finally {
+    await browser.close();
+  }
+}
+
+async function checkPlanNoTimer() {
+  const { browser, page } = await newPageWithStorage(storagePlanNoTimerFixture());
+  try {
+    await waitForAppReady(page);
+    const before = await sessionTimerSnapshot(page);
+    await page.evaluate(() => {
+      window.__wtTestHooks.loadDayIntoLogView('friday', { week: 2, skipDraft: true });
+    });
+    await page.waitForTimeout(800);
+    const after = await sessionTimerSnapshot(page);
+    const planned = await page.evaluate(() => {
+      const t = document.body.innerText;
+      return t.includes('Loaded your plan') || t.includes('planned-not-trained');
+    });
+    const bad = timerStartedForKey(after, 'block1-week2-friday');
+    record(
+      '2-plan-day-no-timer',
+      planned && !bad,
+      'testhooks loadDayIntoLogView(friday, week 2) with blockMetadata plan week2-friday',
+      `plan banner/content=${planned}; timer block1-week2-friday running=${bad}; before=${JSON.stringify(before.react)}, after=${JSON.stringify(after.react)}`,
+    );
+  } finally {
+    await browser.close();
+  }
+}
+
+async function checkDraftHistoryNoTimer() {
+  const { browser, page } = await newPageWithStorage(storageDraftHistoryNoTimerFixture());
+  try {
+    await waitForAppReady(page);
+    await page.getByText('Monday', { exact: false }).first().click();
+    await page.waitForTimeout(800);
+    const restored = await page.evaluate(() => document.body.innerText.includes('Restored unsaved draft'));
+    const after = await sessionTimerSnapshot(page);
+    const bad = timerStartedForKey(after, 'block1-week1-monday');
+    record(
+      '2-draft-history-review-no-timer',
+      restored && !bad,
+      'Saved log exists but newer draft without completed sets; open Monday (draft restore path)',
+      `draft banner=${restored}; timer running for block1-week1-monday=${bad}; react=${JSON.stringify(after.react)}`,
     );
   } finally {
     await browser.close();
@@ -311,6 +399,9 @@ export async function runE2E() {
   await safeRun(checkOutcome2);
   await safeRun(checkOutcome3InBrowser);
   await safeRun(checkOutcome4Template);
+  await safeRun(checkRolloverModalPreview);
+  await safeRun(checkPlanNoTimer);
+  await safeRun(checkDraftHistoryNoTimer);
   await safeRun(checkOutcome5);
   await safeRun(checkOutcome5Simple);
   await safeRun(checkOutcome6Calendar);

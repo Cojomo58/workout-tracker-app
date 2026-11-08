@@ -59,6 +59,110 @@ export function storageWithSavedMonday() {
   };
 }
 
+/** Trained Squat + TM + template % waves — for New Cycle rollover modal. */
+export function storageRolloverModalFixture() {
+  return {
+    'onboarding-complete': 'true',
+    'current-block': '1',
+    'current-week': JSON.stringify({ block: 1, week: 1 }),
+    'workout-blocks': JSON.stringify([BASE_BLOCK]),
+    'workout-logs': JSON.stringify({
+      'block1-week1-monday': {
+        date: '2026-11-01',
+        exercises: [
+          {
+            name: 'Squat',
+            type: 'strength',
+            sets: [{ weight: '225', reps: '5', completed: true }],
+          },
+        ],
+        durationSeconds: 500,
+        prsHit: 0,
+      },
+    }),
+    'personal-records': JSON.stringify({}),
+    'block-metadata': JSON.stringify({
+      1: { name: 'Rollover Fixture Cycle', startDate: '2026-11-01', currentWeek: 1 },
+    }),
+    'training-maxes': JSON.stringify({
+      Squat: {
+        true1RM: 300,
+        trainingMax: 270,
+        trainingMaxPercent: 90,
+        lastUpdated: '2026-11-01',
+        history: [],
+      },
+    }),
+  };
+}
+
+/** Logged week1 monday only; plan on week2 friday (ahead of next-up). */
+export function storagePlanNoTimerFixture() {
+  return {
+    'onboarding-complete': 'true',
+    'current-block': '1',
+    'current-week': JSON.stringify({ block: 1, week: 2 }),
+    'workout-blocks': JSON.stringify([BASE_BLOCK]),
+    'workout-logs': JSON.stringify({
+      'block1-week1-monday': {
+        date: '2026-11-01',
+        exercises: [
+          {
+            name: 'Squat',
+            type: 'strength',
+            sets: [{ weight: '225', reps: '5' }],
+          },
+        ],
+        durationSeconds: 600,
+        prsHit: 0,
+      },
+    }),
+    'personal-records': JSON.stringify({}),
+    'block-metadata': JSON.stringify({
+      1: {
+        name: 'Plan Fixture Cycle',
+        startDate: '2026-11-01',
+        currentWeek: 2,
+        plans: {
+          'week2-friday': {
+            savedAt: Date.now(),
+            exercises: [
+              {
+                name: 'Deadlift',
+                type: 'strength',
+                sets: [{ weight: '315', reps: '5' }],
+                notes: 'planned-not-trained',
+              },
+            ],
+          },
+        },
+      },
+    }),
+    'training-maxes': JSON.stringify({}),
+  };
+}
+
+/** Draft on a saved log slot without completed sets (edit/review path). */
+export function storageDraftHistoryNoTimerFixture() {
+  return {
+    ...storageWithSavedMonday(),
+    'workout-drafts': JSON.stringify({
+      'block1-week1-monday': {
+        savedAt: Date.now(),
+        date: '2026-11-01',
+        exercises: [
+          {
+            name: 'Squat',
+            type: 'strength',
+            notes: 'draft-editing-saved',
+            sets: [{ weight: '225', reps: '5' }],
+          },
+        ],
+      },
+    }),
+  };
+}
+
 export function storageCopyLastFixture() {
   return {
     ...storageWithSavedMonday(),

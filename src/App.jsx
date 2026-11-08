@@ -2911,19 +2911,6 @@ const WorkoutTracker = () => {
     if (draftsTouched) writeDraftsObject(drafts);
   };
 
-  // Expose merge/session helpers for synthetic Playwright verification (never in production builds).
-  React.useEffect(() => {
-    if (import.meta.env.VITE_TEST_HOOKS !== '1' || typeof window === 'undefined') return;
-    window.__wtTestHooks = {
-      mergeExercises,
-      getTrainingMaxes: () => trainingMaxes,
-      getWorkoutLogs: () => workoutLogs,
-      getBlockMetadata: () => blockMetadata,
-      getSessionTimer: () => sessionTimer,
-      readDrafts,
-    };
-  }, [trainingMaxes, workoutLogs, blockMetadata, sessionTimer, mergeExercises]);
-
   const calculateVolume = (sets) => {
     if (!sets || !Array.isArray(sets)) return 0;
     return sets.reduce((total, set) => {
@@ -3351,6 +3338,20 @@ const WorkoutTracker = () => {
     }
     setView('log');
   };
+
+  // Expose merge/session helpers for synthetic Playwright verification (never in production builds).
+  React.useEffect(() => {
+    if (import.meta.env.VITE_TEST_HOOKS !== '1' || typeof window === 'undefined') return;
+    window.__wtTestHooks = {
+      mergeExercises,
+      loadDayIntoLogView,
+      getTrainingMaxes: () => trainingMaxes,
+      getWorkoutLogs: () => workoutLogs,
+      getBlockMetadata: () => blockMetadata,
+      getSessionTimer: () => sessionTimer,
+      readDrafts,
+    };
+  }, [trainingMaxes, workoutLogs, blockMetadata, sessionTimer, mergeExercises, loadDayIntoLogView]);
 
   // Best available fill for a set's empty fields when it's marked complete: the previous set in
   // this exercise, then the template target/%TM, then the matching set from the last session.
