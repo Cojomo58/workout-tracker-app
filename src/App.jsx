@@ -224,6 +224,11 @@ const prescriptionForWeek = (ex, week) => {
   return { sets, reps, pct, label };
 };
 
+// Verification-only exports for isolated regression runs (VITE_TEST_HOOKS=1).
+if (import.meta.env.VITE_TEST_HOOKS === '1' && typeof window !== 'undefined') {
+  window.__wtPure = { foldTrainingMax, prescriptionForWeek, roundToNearest2_5, deriveTrainingMax };
+}
+
 // Standard cycle increment for an exercise that produced no new e1RM. Lower body moves in bigger
 // jumps than upper body -- the usual 5/3/1 convention. Matched against normalized tokens so
 // "BB Squats" and "rdl" (-> romanian deadlift) both classify.
@@ -1142,6 +1147,13 @@ const WorkoutTracker = () => {
   React.useEffect(() => {
     const loadData = async () => {
       setDataLoaded(false);
+      if (import.meta.env.VITE_TEST_HOOKS === '1') {
+        try {
+          if (localStorage.getItem('__wt_verify_slow_load') === '1') {
+            await new Promise(r => setTimeout(r, 450));
+          }
+        } catch { /* ignore */ }
+      }
       let hadData = hasStoredData();
 
       if (user && supabase) {
@@ -2898,6 +2910,19 @@ const WorkoutTracker = () => {
     });
     if (draftsTouched) writeDraftsObject(drafts);
   };
+
+  // Expose merge/session helpers for synthetic Playwright verification (never in production builds).
+  React.useEffect(() => {
+    if (import.meta.env.VITE_TEST_HOOKS !== '1' || typeof window === 'undefined') return;
+    window.__wtTestHooks = {
+      mergeExercises,
+      getTrainingMaxes: () => trainingMaxes,
+      getWorkoutLogs: () => workoutLogs,
+      getBlockMetadata: () => blockMetadata,
+      getSessionTimer: () => sessionTimer,
+      readDrafts,
+    };
+  }, [trainingMaxes, workoutLogs, blockMetadata, sessionTimer, mergeExercises]);
 
   const calculateVolume = (sets) => {
     if (!sets || !Array.isArray(sets)) return 0;
