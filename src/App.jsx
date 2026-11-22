@@ -3,6 +3,7 @@ import { Plus, Minus, ChevronLeft, ChevronRight, ChevronDown, ArrowUp, ArrowDown
 import { LineChart, Line, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
 import Fuse from 'fuse.js';
 import { supabase } from './supabaseClient';
+import { findTemplateExercise, setsForNewWeek } from './prefillWeek.js';
 
 const DEFAULT_TM_PERCENT = 90;
 
@@ -226,7 +227,7 @@ const prescriptionForWeek = (ex, week) => {
 
 // Verification-only exports for isolated regression runs (VITE_TEST_HOOKS=1).
 if (import.meta.env.VITE_TEST_HOOKS === '1' && typeof window !== 'undefined') {
-  window.__wtPure = { foldTrainingMax, prescriptionForWeek, roundToNearest2_5, deriveTrainingMax };
+  window.__wtPure = { foldTrainingMax, prescriptionForWeek, roundToNearest2_5, deriveTrainingMax, setsForNewWeek, findTemplateExercise };
 }
 
 // Standard cycle increment for an exercise that produced no new e1RM. Lower body moves in bigger
@@ -3238,7 +3239,11 @@ const WorkoutTracker = () => {
     } else {
       setLogDate(todayLocalISO());
 
-      // Auto-populate from previous week's same day
+      // Last week's log is only the starting load. Set count and reps come from this week's
+      // template row — the same prescriptionForWeek result the calendar card prints — and the
+      // set list is grown or trimmed to that count. A percentage that resolves to a training
+      // max replaces every set's weight; otherwise each set keeps the weight logged last week
+      // (a set added past last week repeats the last logged weight).
       const prevWeekKey = week > 1
         ? `block${currentBlock}-week${week - 1}-${day}`
         : null;
@@ -3248,48 +3253,22 @@ const WorkoutTracker = () => {
         const templateExercises = workout?.exercises || [];
         setExercises(prevWeekLog.exercises.map(ex => {
           const exType = ex.type || 'strength';
-          const tmplEx = templateExercises.find(t => t.name === ex.name);
-
-          // If template has a weekly progression for this week, use it to set weight
-          const weekOverride = tmplEx?.weeklyProgression?.find(w => w.week === week) ?? null;
-          const effectivePct  = weekOverride?.percentage ?? null;
-          const effectiveSets = weekOverride?.sets ?? null;
-          const effectiveReps = weekOverride?.reps ?? null;
-
-          const tmLookup = tmplEx?.tmLink || ex.name;
-          const pctWeight = (effectivePct && exType === 'strength')
-            ? getPercentageWeight(tmLookup, effectivePct)
+          const tmplEx = findTemplateExercise(templateExercises, ex.name);
+          const rx = tmplEx ? prescriptionForWeek(tmplEx, week) : null;
+          const pctWeight = (rx?.pct && exType === 'strength')
+            ? getPercentageWeight(tmplEx.tmLink || ex.name, rx.pct)
             : null;
-          const targetReps = effectiveReps ? parseTargetReps(effectiveReps) : null;
 
           return {
             name: ex.name,
             type: exType,
             technique: ex.technique,
-            templateTarget: prescriptionForWeek(tmplEx ? {
-              ...tmplEx,
-              sets: effectiveSets ?? tmplEx.sets,
-              reps: effectiveReps ?? tmplEx.reps,
-              percentage: effectivePct ?? tmplEx.percentage,
-            } : { sets: effectiveSets, reps: effectiveReps, percentage: effectivePct }, week).label
-              || (tmplEx ? `${tmplEx.sets}×${tmplEx.reps}` : null),
-            templatePercentage: effectivePct || tmplEx?.percentage || null,
-            templateReps: effectiveReps || tmplEx?.reps || null,
+            templateTarget: rx?.label || null,
+            templatePercentage: rx?.pct || null,
+            templateReps: rx?.reps || null,
             templateRest: tmplEx?.rest || null,
             tmLink: tmplEx?.tmLink || null,
-            sets: ex.sets.map(s =>
-              exType === 'bodyweight'
-                ? { reps: s.reps || '', holdTime: s.holdTime || '' }
-                : exType === 'cardio'
-                  ? { distance: s.distance || '', time: s.time || '', unit: s.unit || 'miles' }
-                  : exType === 'tabata'
-                    ? { rounds: s.rounds || '', workSeconds: s.workSeconds || '20', restSeconds: s.restSeconds || '10', calories: s.calories || '' }
-                    : {
-                        weight: pctWeight ? String(pctWeight) : (s.weight || ''),
-                        reps: targetReps || s.reps || '',
-                        ...(pctWeight ? { weightSource: 'tm-pct' } : {})
-                      }
-            ),
+            sets: setsForNewWeek(ex.sets, { type: exType, prescription: rx, pctWeight }),
             notes: ex.notes || ''
           };
         }));
@@ -3349,9 +3328,10 @@ const WorkoutTracker = () => {
       getWorkoutLogs: () => workoutLogs,
       getBlockMetadata: () => blockMetadata,
       getSessionTimer: () => sessionTimer,
+      getExercises: () => exercises,
       readDrafts,
     };
-  }, [trainingMaxes, workoutLogs, blockMetadata, sessionTimer, mergeExercises, loadDayIntoLogView]);
+  }, [trainingMaxes, workoutLogs, blockMetadata, sessionTimer, exercises, mergeExercises, loadDayIntoLogView]);
 
   // Best available fill for a set's empty fields when it's marked complete: the previous set in
   // this exercise, then the template target/%TM, then the matching set from the last session.
@@ -5202,28 +5182,29 @@ const WorkoutTracker = () => {
                 <button
                   onClick={() => {
                     const workout = getCurrentTemplate()[selectedDay];
-                    setExercises(workout?.exercises.map(ex => {
+                    setExercises((workout?.exercises || []).map(ex => {
                       const exType = ex.type || 'strength';
+                      const rx = prescriptionForWeek(ex, currentWeek);
                       const tmLookup = ex.tmLink || ex.name;
-                      const pctWeight = (ex.percentage && exType === 'strength') ? getPercentageWeight(tmLookup, ex.percentage) : null;
-                      const targetReps = parseTargetReps(ex.reps);
+                      const pctWeight = (rx.pct && exType === 'strength') ? getPercentageWeight(tmLookup, rx.pct) : null;
+                      const targetReps = parseTargetReps(rx.reps);
                       return {
                         name: ex.name,
                         type: exType,
                         technique: ex.technique,
-                        templateTarget: (ex.sets && ex.reps) ? `${ex.sets}×${ex.reps}` : null,
-                        templatePercentage: ex.percentage || null,
-                        templateReps: ex.reps || null,
+                        templateTarget: rx.label,
+                        templatePercentage: rx.pct || null,
+                        templateReps: rx.reps || null,
                         templateRest: ex.rest || null,
                         tmLink: ex.tmLink || null,
-                        sets: Array(parseInt(ex.sets) || 3).fill(null).map(() => ({
+                        sets: Array(parseInt(rx.sets, 10) || 3).fill(null).map(() => ({
                           weight: pctWeight ? String(pctWeight) : '',
                           reps: targetReps,
                           weightSource: pctWeight ? 'tm-pct' : 'manual'
                         })),
                         notes: ''
                       };
-                    }) || []);
+                    }));
                     setPrefilled(false);
                   }}
                   className="text-xs text-purple-400 hover:text-purple-300 underline"
